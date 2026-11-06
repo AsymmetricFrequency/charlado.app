@@ -7,8 +7,8 @@
     <key>CFBundleIconFile</key><string>Charlado</string>
     <key>CFBundleName</key><string>Charlado</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>0.6.1</string>
-    <key>CFBundleVersion</key><string>15</string>
+    <key>CFBundleShortVersionString</key><string>0.7.0</string>
+    <key>CFBundleVersion</key><string>16</string>
     <key>LSMinimumSystemVersion</key><string>26.0</string>
     <key>LSUIElement</key><true/>
     <key>NSMicrophoneUsageDescription</key><string>Captura tu voz mientras mantienes pulsado el atajo de dictado.</string>

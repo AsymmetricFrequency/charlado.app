@@ -155,6 +155,15 @@ final class AudioCapture {
     private var frames: AVAudioFramePosition = 0
     private var writeFailed = false
     private var closed = false
+    private var peak: Float = 0
+
+    func takeLevel() -> Float {
+        lock.withLock {
+            let value = peak
+            peak = 0
+            return value
+        }
+    }
 
     init(url: URL, format: AVAudioFormat) throws {
         file = try audioWriter(at: url, format: format)
@@ -163,6 +172,11 @@ final class AudioCapture {
     func append(_ buffer: AVAudioPCMBuffer) {
         lock.withLock {
             guard !closed, !writeFailed else { return }
+            if let samples = buffer.floatChannelData?[0] {
+                for frame in stride(from: 0, to: Int(buffer.frameLength), by: 16) {
+                    peak = max(peak, abs(samples[frame * buffer.stride]))
+                }
+            }
             do {
                 try file.write(from: buffer)
                 frames += AVAudioFramePosition(buffer.frameLength)
@@ -267,6 +281,7 @@ final class Dictation: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindow
     private let pauseItem = NSMenuItem(title: "Pausar reunión", action: #selector(toggleMeetingPause), keyEquivalent: "")
     private let markerItem = NSMenuItem(title: "Marcar momento", action: #selector(markMeeting), keyEquivalent: "")
     private var meetingTimer: Timer?
+    private var meterTimer: Timer?
     private lazy var meetingButton = NSButton(title: "Iniciar reunión", target: self, action: #selector(toggleMeeting))
     private var language = UserDefaults.standard.string(forKey: "dictationLanguage")
         .flatMap(DictationLanguage.init(rawValue:)) ?? .spanish
@@ -289,7 +304,9 @@ final class Dictation: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindow
     private var fnDown = false
     private var fallbackDown = false
     private var setupWindow: NSWindow?
-    private lazy var indicator = DictationIndicator(target: self, stopAction: #selector(stopMeetingFromIndicator))
+    private lazy var indicator = DictationIndicator(target: self, stopAction: #selector(stopMeetingFromIndicator),
+                                                          pauseAction: #selector(toggleMeetingPause),
+                                                          markerAction: #selector(markMeeting))
     private let fnStatus = NSTextField(labelWithString: "Fn: esperando una pulsación")
     private let setupStatus = NSTextField(wrappingLabelWithString: "")
     private let testResult = NSTextField(wrappingLabelWithString: "El texto de prueba aparecerá aquí.")
@@ -351,6 +368,7 @@ final class Dictation: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindow
         menu.addItem(pauseItem)
         menu.addItem(markerItem)
         menu.addItem(NSMenuItem(title: "Biblioteca de reuniones", action: #selector(openLibrary), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Conexiones MCP…", action: #selector(openConnections), keyEquivalent: ""))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Copiar último dictado", action: #selector(copyLast), keyEquivalent: ""))
         menu.addItem(.separator())
@@ -421,11 +439,17 @@ final class Dictation: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindow
             let meetingActions = NSStackView(views: [
                 meetingButton,
                 NSButton(title: "Biblioteca", target: self, action: #selector(openLibrary)),
-                NSButton(title: "Vocabulario", target: self, action: #selector(editVocabulary))
+                NSButton(title: "Grabar llamada…", target: self, action: #selector(startCallMeeting))
             ])
             meetingActions.spacing = 12
+            let utilities = NSStackView(views: [
+                NSButton(title: "Vocabulario…", target: self, action: #selector(editVocabulary)),
+                NSButton(title: "Conexiones MCP…", target: self, action: #selector(openConnections)),
+                testButton
+            ])
+            utilities.spacing = 10
             let stack = NSStackView(views: [header, instructions, shortcut, divider, languageRow,
-                                            setupStatus, fnStatus, actions, meetingActions, testButton, testResult])
+                                            setupStatus, fnStatus, actions, meetingActions, utilities, testResult])
             stack.orientation = .vertical
             stack.alignment = .leading
             stack.spacing = 16
@@ -587,11 +611,16 @@ final class Dictation: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindow
         let duration = MeetingNote.timestamp(session.activeDuration)
         let title = session.paused ? "Reunión en pausa" : "Grabando reunión"
         let detail = "\(duration) · \(session.markers.count) marcas"
-        indicator.showMeeting(title: title, detail: detail)
+        indicator.showMeeting(title: title, detail: detail, paused: session.paused)
         show("\(title) · \(detail)", icon: session.paused ? "…" : "🔴")
     }
 
     @objc private func openLibrary() { library.open() }
+
+    @objc private func openConnections() {
+        library.open()
+        library.showConnections()
+    }
 
     @objc private func editVocabulary() {
         let alert = NSAlert()
@@ -760,6 +789,7 @@ final class Dictation: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindow
         if let fallbackHandler { RemoveEventHandler(fallbackHandler) }
         if let fnTap { CFMachPortInvalidate(fnTap) }
         meetingTimer?.invalidate()
+        meterTimer?.invalidate()
         session?.stop()
         session?.task?.cancel()
     }
@@ -859,6 +889,12 @@ final class Dictation: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindow
         }
 
         session = recording
+        let timer = Timer(timeInterval: 0.05, repeats: true) { [weak self, weak recording] _ in
+            guard let recording, !recording.paused else { return }
+            self?.indicator.updateLevel(recording.capture?.takeLevel() ?? 0)
+        }
+        meterTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
         languagePicker.isEnabled = false
         updateMeetingMenu()
         if isMeeting {
@@ -892,6 +928,8 @@ final class Dictation: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindow
         let terms = vocabulary
         meetingTimer?.invalidate()
         meetingTimer = nil
+        meterTimer?.invalidate()
+        meterTimer = nil
         recording.callAudio?.pause()
         recording.stop()
         updateMeetingMenu()
@@ -974,6 +1012,8 @@ final class Dictation: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindow
 
     private func resetRecording(_ recording: Recording) {
         session = nil
+        meterTimer?.invalidate()
+        meterTimer = nil
         meetingTimer?.invalidate()
         meetingTimer = nil
         updateMeetingMenu()

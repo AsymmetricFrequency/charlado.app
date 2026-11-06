@@ -164,13 +164,15 @@ struct MeetingNote: Codable {
 }
 
 final class MeetingLibrary: NSObject {
-    private let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 660, height: 510),
+    private let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 690, height: 585),
                                   styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
     private let picker = NSPopUpButton()
     private let titleField = NSTextField(string: "")
     private let notesField = NSTextField(string: "")
     private let transcript = NSTextView()
     private let message = NSTextField(wrappingLabelWithString: "")
+    private let accessStatus = NSTextField(labelWithString: "")
+    private var selectionActions: [NSButton] = []
     private lazy var share = NSButton(title: "Compartir con MCP", target: self, action: #selector(toggleShare))
     private var entries: [MeetingNote] = []
 
@@ -178,13 +180,28 @@ final class MeetingLibrary: NSObject {
         super.init()
         window.title = "Reuniones · Charlado"
         window.isReleasedWhenClosed = false
-        window.minSize = NSSize(width: 630, height: 450)
+        window.minSize = NSSize(width: 630, height: 520)
+        window.appearance = NSAppearance(named: .aqua)
+        window.backgroundColor = CharladoMark.paper
+        let heading = NSTextField(labelWithString: "Reuniones")
+        heading.font = .systemFont(ofSize: 30, weight: .heavy)
+        let access = NSButton(title: "Configurar MCP…", target: self, action: #selector(showConnections))
+        let header = NSStackView(views: [heading, NSView(), access])
+        header.alignment = .centerY
+        accessStatus.font = .monospacedSystemFont(ofSize: 11, weight: .semibold)
+        accessStatus.textColor = .secondaryLabelColor
+        message.font = .systemFont(ofSize: 12)
+        message.textColor = .secondaryLabelColor
         picker.target = self
         picker.action = #selector(selectMeeting)
+        picker.setAccessibilityLabel("Reunión seleccionada")
         titleField.placeholderString = "Título de la reunión"
+        titleField.setAccessibilityLabel("Título de la reunión")
         notesField.placeholderString = "Decisiones, tareas y preguntas abiertas"
+        notesField.setAccessibilityLabel("Notas de la reunión")
         transcript.isEditable = false
         transcript.isRichText = false
+        transcript.setAccessibilityLabel("Transcripción editable")
         transcript.font = .systemFont(ofSize: 14)
         transcript.textContainerInset = NSSize(width: 10, height: 10)
         let scroll = NSScrollView()
@@ -194,14 +211,16 @@ final class MeetingLibrary: NSObject {
         transcript.isVerticallyResizable = true
         transcript.autoresizingMask = [.width]
         transcript.textContainer?.widthTracksTextView = true
-        let actions = NSStackView(views: [
+        selectionActions = [
             NSButton(title: "Guardar cambios", target: self, action: #selector(save)),
             NSButton(title: "Copiar para IA", target: self, action: #selector(copyMeeting)),
-            NSButton(title: "Exportar Markdown", target: self, action: #selector(exportMarkdown)),
-            share
-        ])
-        actions.spacing = 6
-        let rows = NSStackView(views: [picker, titleField, notesField, scroll, actions, message])
+            NSButton(title: "Exportar Markdown", target: self, action: #selector(exportMarkdown))
+        ]
+        let actions = NSStackView(views: selectionActions)
+        actions.spacing = 8
+        let sharing = NSStackView(views: [accessStatus, NSView(), share])
+        sharing.alignment = .centerY
+        let rows = NSStackView(views: [header, picker, titleField, notesField, sharing, scroll, actions, message])
         rows.orientation = .vertical
         rows.alignment = .leading
         rows.spacing = 12
@@ -213,6 +232,8 @@ final class MeetingLibrary: NSObject {
             rows.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20),
             rows.topAnchor.constraint(equalTo: content.topAnchor, constant: 20),
             rows.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -20),
+            header.widthAnchor.constraint(equalTo: rows.widthAnchor),
+            sharing.widthAnchor.constraint(equalTo: rows.widthAnchor),
             picker.widthAnchor.constraint(equalTo: rows.widthAnchor),
             titleField.widthAnchor.constraint(equalTo: rows.widthAnchor),
             notesField.widthAnchor.constraint(equalTo: rows.widthAnchor),
@@ -224,6 +245,11 @@ final class MeetingLibrary: NSObject {
     }
 
     func open(selecting id: UUID? = nil) {
+        if id == nil, window.isVisible {
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKeyAndOrderFront(nil)
+            return
+        }
         entries = MeetingNote.list(in: CharladoFiles.meetings)
         picker.removeAllItems()
         picker.addItems(withTitles: entries.enumerated().map { "\($0.offset + 1). \($0.element.title)" })
@@ -256,7 +282,13 @@ final class MeetingLibrary: NSObject {
         notesField.stringValue = selected?.notes ?? ""
         transcript.isEditable = selected != nil
         transcript.string = selected?.transcriptText ?? "Aún no hay reuniones. Inicia una desde la barra de menú."
-        share.title = selected.map(isShared) == true ? "Retirar de MCP" : "Compartir con MCP"
+        let shared = selected.map(isShared) == true
+        share.title = shared ? "Retirar acceso MCP" : "Compartir con MCP"
+        accessStatus.stringValue = selected == nil ? "SIN REUNIONES" :
+            (shared ? "ACCESO MCP · COMPARTIDA" : "ACCESO MCP · PRIVADA")
+        for button in selectionActions + [share] { button.isEnabled = selected != nil }
+        titleField.isEditable = selected != nil
+        notesField.isEditable = selected != nil
         let marks = selected?.markers.map(MeetingNote.timestamp).joined(separator: " · ") ?? ""
         message.stringValue = [selected?.captureWarning, marks.isEmpty ? nil : "Marcas · " + marks]
             .compactMap { $0 }.joined(separator: "\n")
@@ -295,6 +327,32 @@ final class MeetingLibrary: NSObject {
         }
     }
 
+    @objc func showConnections() {
+        guard window.attachedSheet == nil else { return }
+        let count = MeetingNote.list(in: CharladoFiles.shared).count
+        let alert = NSAlert()
+        alert.messageText = "Conexiones MCP"
+        alert.informativeText = """
+        \(count) reuniones disponibles para los clientes que configures. Comparte cada reunión desde la biblioteca.
+
+        Claude Code se configura con un comando local. ChatGPT usa un túnel seguro. Verifica la conexión desde tu cliente antes de consultar una reunión.
+        """
+        alert.addButton(withTitle: "Listo")
+        alert.addButton(withTitle: "Copiar comando Claude Code")
+        alert.addButton(withTitle: "Copiar comando para túnel")
+        alert.beginSheetModal(for: window) { response in
+            let executable = Bundle.main.executableURL?.path ?? ""
+            let quoted = "'" + executable.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
+            if response == .alertSecondButtonReturn {
+                copyToClipboard("claude mcp add --scope user --transport stdio charlado -- \(quoted) --mcp")
+                self.message.stringValue = "Comando de Claude Code copiado"
+            } else if response == .alertThirdButtonReturn {
+                copyToClipboard("\(quoted) --mcp")
+                self.message.stringValue = "Comando local copiado. Úsalo como mcp-command en el túnel"
+            }
+        }
+    }
+
     @objc private func toggleShare() {
         guard let note = selected else { return }
         do {
@@ -307,9 +365,13 @@ final class MeetingLibrary: NSObject {
                 alert.addButton(withTitle: "Compartir")
                 alert.addButton(withTitle: "Cancelar")
                 guard alert.runModal() == .alertFirstButtonReturn else { return }
-                try note.save(in: CharladoFiles.shared)
+                guard let updated = edited else { return }
+                try updated.save(in: CharladoFiles.meetings)
+                try updated.save(in: CharladoFiles.shared)
+                open(selecting: updated.id)
             }
-            selectMeeting()
+            share.title = isShared(note) ? "Retirar acceso MCP" : "Compartir con MCP"
+            accessStatus.stringValue = isShared(note) ? "ACCESO MCP · COMPARTIDA" : "ACCESO MCP · PRIVADA"
             message.stringValue = isShared(note) ? "Visible para el MCP local" : "Retirada del MCP local"
         } catch { message.stringValue = "No se pudo cambiar el acceso" }
     }

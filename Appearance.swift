@@ -58,9 +58,12 @@ final class DictationIndicator {
     private let detail = NSTextField(labelWithString: "")
     private let symbol = NSImageView()
     private let stopButton = NSButton()
+    private let pauseButton = NSButton()
+    private let markerButton = NSButton()
+    private let meter = VoiceMeter()
 
-    init(target: AnyObject, stopAction: Selector) {
-        let bounds = NSRect(x: 0, y: 0, width: 252, height: 62)
+    init(target: AnyObject, stopAction: Selector, pauseAction: Selector, markerAction: Selector) {
+        let bounds = NSRect(x: 0, y: 0, width: 332, height: 62)
         panel = NSPanel(contentRect: bounds, styleMask: [.borderless, .nonactivatingPanel],
                         backing: .buffered, defer: false)
         panel.isOpaque = false
@@ -88,37 +91,55 @@ final class DictationIndicator {
         detail.textColor = NSColor(white: 0.76, alpha: 1)
         detail.frame = NSRect(x: 60, y: 15, width: 155, height: 15)
         symbol.contentTintColor = CharladoMark.accent
-        symbol.frame = NSRect(x: 216, y: 22, width: 22, height: 22)
-        stopButton.image = NSImage(systemSymbolName: "stop.fill", accessibilityDescription: "Terminar reunión")
-        stopButton.target = target
-        stopButton.action = stopAction
-        stopButton.bezelStyle = .circular
-        stopButton.frame = NSRect(x: 211, y: 16, width: 29, height: 30)
-        stopButton.isHidden = true
-        stopButton.setAccessibilityLabel("Terminar reunión")
-        for view in [mark, title, detail, symbol, stopButton] { surface.addSubview(view) }
+        symbol.frame = NSRect(x: 296, y: 20, width: 23, height: 23)
+        meter.frame = NSRect(x: 214, y: 20, width: 22, height: 22)
+        for (index, item) in [(pauseButton, pauseAction, "Pausar reunión", "pause.fill"),
+                              (markerButton, markerAction, "Marcar momento", "bookmark"),
+                              (stopButton, stopAction, "Terminar reunión", "stop.fill")].enumerated() {
+            let (button, action, label, image) = item
+            button.image = NSImage(systemSymbolName: image, accessibilityDescription: label)
+            button.target = target
+            button.action = action
+            button.bezelStyle = .circular
+            button.frame = NSRect(x: 242 + 27 * index, y: 17, width: 26, height: 28)
+            button.isHidden = true
+            button.toolTip = label
+            button.setAccessibilityLabel(label)
+        }
+        for view in [mark, title, detail, symbol, meter, pauseButton, markerButton, stopButton] {
+            surface.addSubview(view)
+        }
     }
 
     func show(processing: Bool, test: Bool = false, fallback: Bool = false) {
         panel.ignoresMouseEvents = true
-        stopButton.isHidden = true
-        symbol.isHidden = false
+        for button in [pauseButton, markerButton, stopButton] { button.isHidden = true }
+        meter.isHidden = processing
+        symbol.isHidden = !processing
         title.stringValue = processing ? "Preparando texto" : "Tomando nota"
         detail.stringValue = processing ? "Transcripción local" :
             (test ? "Prueba de micrófono" : (fallback ? "Suelta el atajo para terminar" : "Suelta Fn para terminar"))
-        symbol.image = NSImage(systemSymbolName: processing ? "ellipsis" : "waveform",
-                               accessibilityDescription: title.stringValue)
+        symbol.image = NSImage(systemSymbolName: "ellipsis", accessibilityDescription: "Procesando")
         reveal()
     }
 
-    func showMeeting(title: String, detail: String) {
+    func showMeeting(title: String, detail: String, paused: Bool) {
         self.title.stringValue = title
         self.detail.stringValue = detail
         panel.ignoresMouseEvents = false
-        stopButton.isHidden = false
+        for button in [pauseButton, markerButton, stopButton] { button.isHidden = false }
+        let label = paused ? "Reanudar reunión" : "Pausar reunión"
+        pauseButton.image = NSImage(systemSymbolName: paused ? "play.fill" : "pause.fill",
+                                    accessibilityDescription: label)
+        pauseButton.toolTip = label
+        pauseButton.setAccessibilityLabel(label)
+        markerButton.isEnabled = !paused
         symbol.isHidden = true
+        meter.isHidden = paused
         reveal()
     }
+
+    func updateLevel(_ level: Float) { meter.update(level) }
 
     private func reveal() {
         if !panel.isVisible {
@@ -131,5 +152,34 @@ final class DictationIndicator {
         }
     }
 
-    func hide() { panel.orderOut(nil) }
+    func hide() {
+        meter.update(0)
+        panel.orderOut(nil)
+    }
+}
+
+private final class VoiceMeter: NSView {
+    private var level: CGFloat = 0
+
+    func update(_ sample: Float) {
+        let target: CGFloat
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            target = 0.38
+        } else {
+            target = max(0, min(1, CGFloat(sample) * 4))
+        }
+        let next = level + (target - level) * (target > level ? 0.6 : 0.3)
+        guard abs(next - level) > 0.01 else { return }
+        level = next
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        CharladoMark.accent.setFill()
+        for (index, weight) in [0.45, 1.0, 0.66].enumerated() {
+            let height = 4 + 17 * level * weight
+            let bar = NSRect(x: 3 + CGFloat(index) * 6, y: (bounds.height - height) / 2, width: 3, height: height)
+            NSBezierPath(roundedRect: bar, xRadius: 1.5, yRadius: 1.5).fill()
+        }
+    }
 }

@@ -78,7 +78,8 @@ Para grabaciones de un solo idioma puedes elegir el modelo de macOS directamente
    captura audio del micrófono y de la aplicación seleccionada. En un navegador,
    eso puede incluir audio de otras pestañas de la misma aplicación.
 3. Usa **Pausar reunión**, **Reanudar reunión** o **Marcar momento** desde el mismo
-   menú. El indicador muestra la duración grabada y el número de marcas.
+   menú o desde el indicador flotante. El indicador muestra la duración, las
+   marcas y el nivel del micrófono. Con Reducir movimiento activo, el medidor es fijo.
 4. Pulsa **Terminar reunión**. La biblioteca guarda la transcripción con marcas de
    tiempo, y permite añadir notas, exportar Markdown o usar **Copiar para IA**.
    En llamadas las etiquetas **Micrófono** y **Llamada** identifican la fuente
@@ -90,6 +91,10 @@ temporales de audio al terminar una sesión normal. **Copiar para IA** prepara e
 texto y una solicitud de resumen para que decidas dónde pegarlo.
 
 ## MCP de reuniones
+
+Abre **Conexiones MCP** en Charlado para ver cuántas reuniones has compartido
+y copiar el comando de Claude Code o del túnel. La pantalla muestra el acceso
+local. Verifica el estado de la conexión desde el cliente.
 
 En la biblioteca selecciona una reunión y pulsa **Compartir con MCP**. El
 servidor solo puede consultar las reuniones compartidas, mediante
