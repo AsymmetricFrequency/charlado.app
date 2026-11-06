@@ -987,15 +987,27 @@ final class Dictation: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindow
                 guard self.session === recording else { return }
                 segments = PersonalVocabulary.apply(terms, to: segments)
                 if recording.isMeeting, !segments.isEmpty {
-                    let note = MeetingNote(id: UUID(), date: recording.startedAt,
+                    var note = MeetingNote(id: UUID(), date: recording.startedAt,
                                            title: "Reunión " + recording.startedAt.formatted(date: .abbreviated, time: .shortened),
                                            language: selectedLanguage.title, markers: recording.markers,
                                            segments: segments, notes: "",
                                            captureWarning: warnings.isEmpty ? nil : warnings.joined(separator: " "))
                     try note.save(in: CharladoFiles.meetings)
+                    self.show("Preparando decisiones y tareas", icon: "…")
+                    let draft = await MeetingDraft.generate(from: segments)
+                    let saved = note.location(in: CharladoFiles.meetings)
+                    note = try JSONDecoder().decode(MeetingNote.self, from: Data(contentsOf: saved))
+                    if note.draft == nil {
+                        note.draft = draft
+                        try note.save(in: CharladoFiles.meetings)
+                        if FileManager.default.fileExists(atPath: note.location(in: CharladoFiles.shared).path) {
+                            try note.save(in: CharladoFiles.shared)
+                        }
+                    }
                     self.resetRecording(recording)
                     self.show("Reunión guardada")
                     self.library.open(selecting: note.id)
+                    self.library.showDraft()
                 } else {
                     recording.latest = segments.map(\.text).joined(separator: " ")
                     self.finish(recording, interrupted: false,
@@ -1074,8 +1086,31 @@ if CommandLine.arguments.dropFirst() == ["--check"] {
     precondition((first.transcriptText as NSString).substring(with: hits[0].range) == "reunión de diseño")
     precondition(MeetingSearch.find(" ", in: [first]).isEmpty)
     precondition(MeetingSearch.find("diseño sin", in: [first]).isEmpty)
+    let source = TranscriptSegment(seconds: 75, text: "Ana se encarga de enviar el informe para mañana.")
+    let fallback = MeetingDraft.fallback([source, TranscriptSegment(seconds: 130, text: "We agreed to ship on Friday.")])
+    precondition(fallback.count == 2 && fallback[0].owner == "Ana" && fallback[0].due == "mañana")
+    precondition(fallback.map(\.minute) == ["01:15", "02:10"])
+    let candidate = MeetingDraft.Candidate(kind: .task, sourceIndex: 0, text: "Enviar el informe",
+                                           evidence: source.text, owner: "Ana", due: "viernes")
+    let point = MeetingDraft.grounded(candidate, in: [source])
+    precondition(point?.owner == "Ana" && point?.due == nil && point?.minute == "01:15")
+    let invented = MeetingDraft.Candidate(kind: .task, sourceIndex: 0, text: "Otro punto",
+                                          evidence: "Texto ausente", owner: "", due: "")
+    precondition(MeetingDraft.grounded(invented, in: [source]) == nil)
     try MeetingMCP.check()
     print("Limpieza de texto y acceso de reuniones verificados")
+} else if CommandLine.arguments.dropFirst() == ["--draft-test"] {
+    Task {
+        let sample = [
+            TranscriptSegment(seconds: 25, text: "Acordamos lanzar primero la versión beta."),
+            TranscriptSegment(seconds: 72, text: "Ana se encarga de enviar el informe para mañana."),
+            TranscriptSegment(seconds: 136, text: "Maya is responsible for updating the launch checklist by Friday."),
+            TranscriptSegment(seconds: 192, text: "Tarea: revisar el tablero.")
+        ]
+        print(await MeetingDraft.generate(from: sample))
+        exit(0)
+    }
+    dispatchMain()
 } else if CommandLine.arguments.dropFirst() == ["--mcp"] {
     MeetingMCP.run()
 } else if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--iconset" {

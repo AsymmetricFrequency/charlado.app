@@ -104,6 +104,7 @@ struct MeetingNote: Codable {
     var notes: String
     var captureWarning: String? = nil
     var editedTranscript: String? = nil
+    var draft: String? = nil
 
     var transcriptText: String {
         editedTranscript ?? segments.map {
@@ -115,12 +116,13 @@ struct MeetingNote: Codable {
     var markdown: String {
         let points = markers.map { "- \(Self.timestamp($0))" }.joined(separator: "\n")
         let warning = captureWarning.map { "\n> \($0)\n" } ?? ""
+        let draftSection = draft.map { "## Borrador de la reunión\n\n" + $0 + "\n\n" } ?? ""
         return """
         # \(title)
 
         \(date.formatted(date: .abbreviated, time: .shortened)) · \(language)
         \(warning)
-        ## Decisiones, tareas y preguntas
+        \(draftSection)## Notas de la reunión
 
         \(notes)
 
@@ -269,6 +271,7 @@ final class MeetingLibrary: NSObject {
         transcript.autoresizingMask = [.width]
         transcript.textContainer?.widthTracksTextView = true
         selectionActions = [
+            NSButton(title: "Decisiones y tareas…", target: self, action: #selector(showDraft)),
             NSButton(title: "Guardar cambios", target: self, action: #selector(save)),
             NSButton(title: "Copiar para IA", target: self, action: #selector(copyMeeting)),
             NSButton(title: "Exportar Markdown", target: self, action: #selector(exportMarkdown))
@@ -399,6 +402,45 @@ final class MeetingLibrary: NSObject {
             open(selecting: note.id)
             message.stringValue = "Cambios guardados"
         } catch { message.stringValue = "No se pudieron guardar los cambios" }
+    }
+
+    @objc func showDraft() {
+        guard let note = selected, window.attachedSheet == nil else { return }
+        let alert = NSAlert()
+        alert.messageText = "Decisiones y tareas"
+        alert.informativeText = "Revisa el borrador antes de usarlo. Los minutos apuntan al inicio del fragmento de origen."
+        alert.addButton(withTitle: "Guardar borrador")
+        alert.addButton(withTitle: "Cancelar")
+
+        let editor = NSTextView(frame: NSRect(x: 0, y: 0, width: 500, height: 245))
+        editor.isRichText = false
+        editor.isVerticallyResizable = true
+        editor.autoresizingMask = [.width]
+        editor.textContainer?.widthTracksTextView = true
+        editor.font = .systemFont(ofSize: 14)
+        editor.textContainerInset = NSSize(width: 9, height: 9)
+        editor.string = note.draft ?? MeetingDraft.empty
+        editor.setAccessibilityLabel("Borrador editable de decisiones y tareas")
+        let scroll = NSScrollView(frame: editor.frame)
+        scroll.borderType = .bezelBorder
+        scroll.hasVerticalScroller = true
+        scroll.documentView = editor
+        alert.accessoryView = scroll
+        alert.window.initialFirstResponder = editor
+        alert.beginSheetModal(for: window) { response in
+            guard response == .alertFirstButtonReturn,
+                  let index = self.entries.firstIndex(where: { $0.id == note.id }) else { return }
+            do {
+                var updated = self.entries[index]
+                updated.draft = editor.string
+                try updated.save(in: CharladoFiles.meetings)
+                self.entries[index] = updated
+                if self.isShared(updated) { try updated.save(in: CharladoFiles.shared) }
+                self.message.stringValue = "Borrador guardado"
+            } catch {
+                self.message.stringValue = "No se pudo guardar el borrador"
+            }
+        }
     }
 
     @objc private func copyMeeting() {

@@ -90,6 +90,19 @@ Charlado guarda las notas y transcripciones en
 temporales de audio al terminar una sesión normal. **Copiar para IA** prepara el
 texto y una solicitud de resumen para que decidas dónde pegarlo.
 
+## Decisiones y tareas
+
+Al terminar una reunión, Charlado guarda la transcripción y prepara un borrador
+editable en **Decisiones y tareas**. Cada punto incluye el minuto inicial del
+fragmento de origen. El borrador conserva los plazos relativos como se dijeron
+y muestra **Sin asignar** o **Sin fecha** cuando faltan esos datos.
+
+Charlado usa Apple Intelligence de forma local cuando está disponible y también
+detecta expresiones explícitas como «acordamos» o «se encarga de». Si Apple
+Intelligence no está disponible, esa detección sigue funcionando, aunque puede
+dejar más puntos para revisión manual. El borrador se incluye al exportar o
+compartir la reunión. Revísalo antes de usarlo como acta.
+
 ## Buscar en la biblioteca
 
 Escribe una frase en **Buscar en todas las reuniones**. La búsqueda incluye

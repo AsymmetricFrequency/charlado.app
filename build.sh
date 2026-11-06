@@ -9,7 +9,7 @@ destination="${1:-$HOME/Applications/Charlado.app}"
 
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$build_dir/Charlado.iconset" "$(dirname "$destination")"
 cp "$source_dir/Info.plist" "$app/Contents/Info.plist"
-MACOSX_DEPLOYMENT_TARGET=26.0 swiftc -swift-version 5 -O "$source_dir/main.swift" "$source_dir/Appearance.swift" "$source_dir/Features.swift" "$source_dir/MeetingMCP.swift" "$source_dir/CallAudio.swift" \
+MACOSX_DEPLOYMENT_TARGET=26.0 swiftc -swift-version 5 -O "$source_dir/main.swift" "$source_dir/Appearance.swift" "$source_dir/Features.swift" "$source_dir/MeetingMCP.swift" "$source_dir/CallAudio.swift" "$source_dir/MeetingDraft.swift" \
     -o "$app/Contents/MacOS/Charlado"
 "$app/Contents/MacOS/Charlado" --check
 "$app/Contents/MacOS/Charlado" --iconset "$build_dir/Charlado.iconset"
