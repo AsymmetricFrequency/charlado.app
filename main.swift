@@ -88,6 +88,53 @@ enum DictationLanguage: String, CaseIterable {
     }
 }
 
+private func audioWriter(at url: URL, format: AVAudioFormat) throws -> AVAudioFile {
+    var settings = format.settings
+    settings[AVLinearPCMIsNonInterleaved] = false
+    return try AVAudioFile(forWriting: url, settings: settings,
+                           commonFormat: format.commonFormat, interleaved: format.isInterleaved)
+}
+
+private final class AudioCapture {
+    enum Outcome {
+        case recorded, empty, writeFailed
+    }
+
+    private let lock = NSLock()
+    private let file: AVAudioFile
+    private var frames: AVAudioFramePosition = 0
+    private var writeFailed = false
+    private var closed = false
+
+    init(url: URL, format: AVAudioFormat) throws {
+        file = try audioWriter(at: url, format: format)
+    }
+
+    func append(_ buffer: AVAudioPCMBuffer) {
+        lock.withLock {
+            guard !closed, !writeFailed else { return }
+            do {
+                try file.write(from: buffer)
+                frames += AVAudioFramePosition(buffer.frameLength)
+            } catch {
+                writeFailed = true
+                diagnostics.error("Falló la escritura de audio: \((error as NSError).code)")
+            }
+        }
+    }
+
+    func finish() -> Outcome {
+        lock.withLock {
+            if !closed {
+                closed = true
+                file.close()
+            }
+            if writeFailed { return .writeFailed }
+            return frames > 0 ? .recorded : .empty
+        }
+    }
+}
+
 enum LocalSpeech {
     static func prepare(_ language: DictationLanguage) async throws -> Locale {
         for identifier in language.localeIdentifiers {
@@ -123,8 +170,8 @@ enum LocalSpeech {
     private static func appendTrailingSilence(from source: URL, to destination: URL) throws {
         let input = try AVAudioFile(forReading: source)
         let format = input.processingFormat
-        let output = try AVAudioFile(forWriting: destination, settings: format.settings,
-                                     commonFormat: format.commonFormat, interleaved: format.isInterleaved)
+        let output = try audioWriter(at: destination, format: format)
+        defer { output.close() }
         let silenceFrames = AVAudioFrameCount(format.sampleRate * 1.2)
         guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: silenceFrames) else {
             throw NSError(domain: "CharladoSpeech", code: 2)
@@ -190,6 +237,8 @@ final class Dictation: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindow
         let destination: Destination?
         let isTest: Bool
         var task: Task<Void, Never>?
+        var capture: AudioCapture?
+        var captureOutcome: AudioCapture.Outcome = .empty
         var latest = ""
         var stopped = false
 
@@ -203,6 +252,8 @@ final class Dictation: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindow
             stopped = true
             engine.stop()
             engine.inputNode.removeTap(onBus: 0)
+            captureOutcome = capture?.finish() ?? .empty
+            capture = nil
         }
 
         deinit { try? FileManager.default.removeItem(at: url) }
@@ -542,11 +593,10 @@ final class Dictation: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindow
         }
 
         do {
-            let file = try AVAudioFile(forWriting: recording.url, settings: format.settings,
-                                       commonFormat: format.commonFormat, interleaved: format.isInterleaved)
+            let capture = try AudioCapture(url: recording.url, format: format)
+            recording.capture = capture
             input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
-                do { try file.write(from: buffer) }
-                catch { NSLog("Charlado: error escribiendo audio: %@", String(describing: error)) }
+                capture.append(buffer)
             }
             do { try recording.engine.start() }
             catch {
@@ -578,6 +628,16 @@ final class Dictation: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindow
     private func endRecording(_ recording: Recording) {
         guard !recording.stopped, let locale = speechLocale else { return }
         recording.stop()
+        switch recording.captureOutcome {
+        case .empty:
+            finish(recording, interrupted: false, failure: "El micrófono no entregó audio. Mantén el atajo mientras hablas")
+            return
+        case .writeFailed:
+            finish(recording, interrupted: true, failure: "Falló la grabación. Vuelve a intentar con Probar micrófono")
+            return
+        case .recorded:
+            break
+        }
         indicator.show(processing: true)
         show("Procesando dictado", icon: "…")
         recording.task = Task { @MainActor [weak self, weak recording] in
@@ -588,13 +648,14 @@ final class Dictation: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindow
                 self.finish(recording, interrupted: false)
             } catch {
                 guard self.session === recording else { return }
-                NSLog("Charlado: error de transcripción: %@", String(describing: error))
+                let failure = error as NSError
+                diagnostics.error("Falló el reconocimiento en \(locale.identifier, privacy: .public): \(failure.domain, privacy: .public) (\(failure.code))")
                 self.finish(recording, interrupted: true)
             }
         }
     }
 
-    private func finish(_ recording: Recording, interrupted: Bool) {
+    private func finish(_ recording: Recording, interrupted: Bool, failure: String? = nil) {
         session = nil
         languagePicker.isEnabled = true
         indicator.hide()
@@ -603,7 +664,11 @@ final class Dictation: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindow
         recording.task?.cancel()
         let text = clean(recording.latest)
         guard !text.isEmpty else {
-            show(interrupted ? "El reconocimiento se interrumpió" : "No se detectó texto", icon: "🎙!")
+            let message = failure ?? (interrupted ? "Falló la transcripción local" :
+                "Se grabó audio, pero no se reconocieron palabras en \(language.title)")
+            diagnostics.notice("\(message, privacy: .public)")
+            if recording.isTest { testResult.stringValue = message }
+            show(message, icon: "🎙!")
             return
         }
         lastText = text
