@@ -1062,6 +1062,18 @@ if CommandLine.arguments.dropFirst() == ["--check"] {
     let sample = TranscriptSegment(seconds: 0, text: "Usa github y pull request en githubdesk.")
     precondition(PersonalVocabulary.apply(["GitHub", "pull request"], to: [sample]).first?.text ==
                  "Usa GitHub y pull request en githubdesk.")
+    let first = MeetingNote(id: UUID(), date: Date(), title: "Primera", language: "Español",
+                            markers: [], segments: [TranscriptSegment(seconds: 4, text: "☕ La reunión de diseño"),
+                                                    TranscriptSegment(seconds: 68, text: "Sin coincidencia")], notes: "")
+    var second = MeetingNote(id: UUID(), date: Date(), title: "Segunda", language: "Español",
+                             markers: [], segments: [], notes: "")
+    second.editedTranscript = "**02:03** La REUNIÓN de diseño quedó confirmada."
+    let hits = MeetingSearch.find("reunion de DISEÑO", in: [first, second])
+    precondition(hits.map(\.minute) == ["00:04", "02:03"])
+    precondition(hits.map(\.meetingID) == [first.id, second.id])
+    precondition((first.transcriptText as NSString).substring(with: hits[0].range) == "reunión de diseño")
+    precondition(MeetingSearch.find(" ", in: [first]).isEmpty)
+    precondition(MeetingSearch.find("diseño sin", in: [first]).isEmpty)
     try MeetingMCP.check()
     print("Limpieza de texto y acceso de reuniones verificados")
 } else if CommandLine.arguments.dropFirst() == ["--mcp"] {

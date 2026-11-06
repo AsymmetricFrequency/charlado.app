@@ -90,6 +90,14 @@ Charlado guarda las notas y transcripciones en
 temporales de audio al terminar una sesión normal. **Copiar para IA** prepara el
 texto y una solicitud de resumen para que decidas dónde pegarlo.
 
+## Buscar en la biblioteca
+
+Escribe una frase en **Buscar en todas las reuniones**. La búsqueda incluye
+las transcripciones locales, tanto privadas como compartidas, e ignora
+mayúsculas y tildes. Elige una coincidencia por reunión y minuto y pulsa
+**Ir al fragmento** para abrir la transcripción y resaltar el texto. Si
+editaste una transcripción, guarda los cambios para incluirlos en la búsqueda.
+
 ## MCP de reuniones
 
 Abre **Conexiones MCP** en Charlado para ver cuántas reuniones has compartido

@@ -163,10 +163,54 @@ struct MeetingNote: Codable {
     }
 }
 
+struct MeetingSearchHit {
+    let meetingID: UUID
+    let title: String
+    let minute: String?
+    let preview: String
+    let range: NSRange
+}
+
+enum MeetingSearch {
+    private static let stamps = try! NSRegularExpression(pattern: #"(?m)^\*\*([0-9]+:[0-5][0-9])\*\*[ \t]*"#)
+
+    static func find(_ query: String, in meetings: [MeetingNote]) -> [MeetingSearchHit] {
+        let phrase = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !phrase.isEmpty else { return [] }
+        return meetings.flatMap { meeting -> [MeetingSearchHit] in
+            let text = meeting.transcriptText as NSString
+            let whole = NSRange(location: 0, length: text.length)
+            let matches = stamps.matches(in: text as String, range: whole)
+            let starts = [0] + matches.map { NSMaxRange($0.range) }
+            let ends = matches.map { $0.range.location } + [text.length]
+            return starts.indices.compactMap { index in
+                let block = NSRange(location: starts[index], length: ends[index] - starts[index])
+                let hit = text.range(of: phrase, options: [.caseInsensitive, .diacriticInsensitive], range: block)
+                guard hit.location != NSNotFound else { return nil }
+                let minute = index == 0 ? nil : text.substring(with: matches[index - 1].range(at: 1))
+                let previewStart = max(block.location, hit.location - 28)
+                let previewEnd = min(NSMaxRange(block), NSMaxRange(hit) + 48)
+                let previewRange = text.rangeOfComposedCharacterSequences(
+                    for: NSRange(location: previewStart, length: previewEnd - previewStart))
+                let preview = text.substring(with: previewRange)
+                    .split(whereSeparator: \.isWhitespace).joined(separator: " ")
+                return MeetingSearchHit(meetingID: meeting.id, title: meeting.title,
+                                        minute: minute, preview: preview, range: hit)
+            }
+        }
+    }
+}
+
 final class MeetingLibrary: NSObject {
-    private let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 690, height: 585),
+    private let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 690, height: 640),
                                   styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
     private let picker = NSPopUpButton()
+    private let search = NSSearchField()
+    private let results = NSPopUpButton()
+    private let resultCount = NSTextField(labelWithString: "")
+    private let resultRow = NSStackView()
+    private lazy var jump = NSButton(title: "Ir al fragmento", target: self, action: #selector(jumpToResult))
+    private var hits: [MeetingSearchHit] = []
     private let titleField = NSTextField(string: "")
     private let notesField = NSTextField(string: "")
     private let transcript = NSTextView()
@@ -180,7 +224,7 @@ final class MeetingLibrary: NSObject {
         super.init()
         window.title = "Reuniones · Charlado"
         window.isReleasedWhenClosed = false
-        window.minSize = NSSize(width: 630, height: 520)
+        window.minSize = NSSize(width: 630, height: 580)
         window.appearance = NSAppearance(named: .aqua)
         window.backgroundColor = CharladoMark.paper
         let heading = NSTextField(labelWithString: "Reuniones")
@@ -195,6 +239,19 @@ final class MeetingLibrary: NSObject {
         picker.target = self
         picker.action = #selector(selectMeeting)
         picker.setAccessibilityLabel("Reunión seleccionada")
+        search.placeholderString = "Buscar una frase en todas las reuniones"
+        search.setAccessibilityLabel("Buscar en todas las reuniones")
+        search.sendsSearchStringImmediately = true
+        search.target = self
+        search.action = #selector(updateSearch)
+        results.setAccessibilityLabel("Resultados de búsqueda")
+        results.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        resultCount.font = .systemFont(ofSize: 12)
+        resultCount.textColor = .secondaryLabelColor
+        resultRow.alignment = .centerY
+        resultRow.spacing = 8
+        for view in [results, jump, resultCount] { resultRow.addArrangedSubview(view) }
+        resultRow.isHidden = true
         titleField.placeholderString = "Título de la reunión"
         titleField.setAccessibilityLabel("Título de la reunión")
         notesField.placeholderString = "Decisiones, tareas y preguntas abiertas"
@@ -220,7 +277,7 @@ final class MeetingLibrary: NSObject {
         actions.spacing = 8
         let sharing = NSStackView(views: [accessStatus, NSView(), share])
         sharing.alignment = .centerY
-        let rows = NSStackView(views: [header, picker, titleField, notesField, sharing, scroll, actions, message])
+        let rows = NSStackView(views: [header, search, resultRow, picker, titleField, notesField, sharing, scroll, actions, message])
         rows.orientation = .vertical
         rows.alignment = .leading
         rows.spacing = 12
@@ -233,6 +290,8 @@ final class MeetingLibrary: NSObject {
             rows.topAnchor.constraint(equalTo: content.topAnchor, constant: 20),
             rows.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -20),
             header.widthAnchor.constraint(equalTo: rows.widthAnchor),
+            search.widthAnchor.constraint(equalTo: rows.widthAnchor),
+            resultRow.widthAnchor.constraint(equalTo: rows.widthAnchor),
             sharing.widthAnchor.constraint(equalTo: rows.widthAnchor),
             picker.widthAnchor.constraint(equalTo: rows.widthAnchor),
             titleField.widthAnchor.constraint(equalTo: rows.widthAnchor),
@@ -255,8 +314,46 @@ final class MeetingLibrary: NSObject {
         picker.addItems(withTitles: entries.enumerated().map { "\($0.offset + 1). \($0.element.title)" })
         if let id, let index = entries.firstIndex(where: { $0.id == id }) { picker.selectItem(at: index) }
         selectMeeting()
+        updateSearch()
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
+    }
+
+    @objc private func updateSearch() {
+        let query = search.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        resultRow.isHidden = query.isEmpty
+        let matches = MeetingSearch.find(query, in: entries)
+        hits = Array(matches.prefix(100))
+        results.removeAllItems()
+        results.addItems(withTitles: hits.enumerated().map { index, hit in
+            "\(index + 1). \(hit.minute ?? "Sin minuto") · \(hit.title) · \(hit.preview)"
+        })
+        results.isHidden = hits.isEmpty
+        jump.isHidden = hits.isEmpty
+        switch matches.count {
+        case 0: resultCount.stringValue = "Sin coincidencias"
+        case 1: resultCount.stringValue = "1 coincidencia"
+        case 2...100: resultCount.stringValue = "\(matches.count) coincidencias"
+        default: resultCount.stringValue = "100 de \(matches.count)"
+        }
+    }
+
+    @objc private func jumpToResult() {
+        guard hits.indices.contains(results.indexOfSelectedItem) else { return }
+        let hit = hits[results.indexOfSelectedItem]
+        guard let index = entries.firstIndex(where: { $0.id == hit.meetingID }) else { return }
+        if let selected, let edited,
+           edited.title != selected.title || edited.notes != selected.notes ||
+               edited.transcriptText != selected.transcriptText {
+            message.stringValue = "Guarda los cambios antes de abrir un resultado de búsqueda."
+            return
+        }
+        picker.selectItem(at: index)
+        selectMeeting()
+        window.makeFirstResponder(transcript)
+        transcript.setSelectedRange(hit.range)
+        transcript.scrollRangeToVisible(hit.range)
+        message.stringValue = hit.minute.map { "Fragmento en \($0)" } ?? "Fragmento sin marca de tiempo"
     }
 
     private var selected: MeetingNote? {
