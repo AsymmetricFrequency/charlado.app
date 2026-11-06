@@ -23,49 +23,90 @@ func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
 }
 
 struct Destination {
-    let pid: pid_t
-    let element: AXUIElement
-    let selection: CFTypeRef?
+    private enum Focus {
+        case editor(element: AXUIElement, selection: CFTypeRef?)
+        case terminal(window: AXUIElement, element: AXUIElement?)
+    }
+
+    private let pid: pid_t
+    private let bundleID: String
+    private let focus: Focus
+
+    private static func element(_ value: CFTypeRef?, belongingTo pid: pid_t) -> AXUIElement? {
+        guard let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+        let element = value as! AXUIElement
+        var owner: pid_t = 0
+        return AXUIElementGetPid(element, &owner) == .success && owner == pid ? element : nil
+    }
 
     static func current() -> Destination? {
         guard let app = NSWorkspace.shared.frontmostApplication,
               app.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return nil }
-        let appElement = AXUIElementCreateApplication(app.processIdentifier)
-        guard let focused = attribute(AXUIElementCreateSystemWide(), kAXFocusedUIElementAttribute)
-              ?? attribute(appElement, kAXFocusedUIElementAttribute),
-              CFGetTypeID(focused) == AXUIElementGetTypeID() else { return nil }
-        let element = focused as! AXUIElement
-        var pid: pid_t = 0
-        guard AXUIElementGetPid(element, &pid) == .success, pid == app.processIdentifier
-        else { return nil }
-        guard let role = attribute(element, kAXRoleAttribute) as? String,
-              [kAXTextFieldRole, kAXTextAreaRole, kAXComboBoxRole].contains(role),
-              attribute(element, kAXSubroleAttribute) as? String != kAXSecureTextFieldSubrole
-        else { return nil }
-        return Destination(pid: app.processIdentifier, element: element,
-                           selection: attribute(element, kAXSelectedTextRangeAttribute))
+        let pid = app.processIdentifier
+        let bundleID = app.bundleIdentifier ?? "desconocida"
+        let appElement = AXUIElementCreateApplication(pid)
+        let focused = element(attribute(AXUIElementCreateSystemWide(), kAXFocusedUIElementAttribute),
+                              belongingTo: pid)
+            ?? element(attribute(appElement, kAXFocusedUIElementAttribute), belongingTo: pid)
+
+        if let focused, attribute(focused, kAXSubroleAttribute) as? String == kAXSecureTextFieldSubrole {
+            return nil
+        }
+
+        // Shell output can change AXSelectedTextRange even when the terminal pane stays focused.
+        if bundleID == "com.apple.Terminal" || bundleID == "com.googlecode.iterm2" {
+            guard !IsSecureEventInputEnabled(),
+                  let window = element(attribute(appElement, kAXFocusedWindowAttribute), belongingTo: pid)
+            else { return nil }
+            return Destination(pid: pid, bundleID: bundleID, focus: .terminal(window: window, element: focused))
+        }
+
+        guard let focused, let role = attribute(focused, kAXRoleAttribute) as? String,
+              [kAXTextFieldRole, kAXTextAreaRole, kAXComboBoxRole].contains(role)
+        else {
+            diagnostics.notice("Sin campo compatible en \(bundleID, privacy: .public)")
+            return nil
+        }
+        return Destination(pid: pid, bundleID: bundleID,
+                           focus: .editor(element: focused, selection: attribute(focused, kAXSelectedTextRangeAttribute)))
     }
 
     func requestPaste() -> Bool {
-        guard stillFocused(), CGPreflightPostEventAccess(),
+        guard stillFocused() else {
+            diagnostics.notice("Cambió el destino de pegado en \(bundleID, privacy: .public)")
+            return false
+        }
+        guard CGPreflightPostEventAccess(),
               let source = CGEventSource(stateID: .privateState),
               let down = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(kVK_ANSI_V), keyDown: true),
               let up = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(kVK_ANSI_V), keyDown: false)
-        else { return false }
+        else {
+            diagnostics.notice("macOS no permitió solicitar el pegado en \(bundleID, privacy: .public)")
+            return false
+        }
 
         down.flags = .maskCommand
         up.flags = .maskCommand
         down.post(tap: .cghidEventTap)
         up.post(tap: .cghidEventTap)
+        diagnostics.notice("Pegado solicitado en \(bundleID, privacy: .public)")
         return true
     }
 
     private func stillFocused() -> Bool {
-        guard let current = Self.current(), pid == current.pid, CFEqual(element, current.element)
-        else { return false }
-        guard let selection else { return true }
-        guard let currentSelection = current.selection else { return false }
-        return CFEqual(selection, currentSelection)
+        guard let current = Self.current(), pid == current.pid else { return false }
+        switch (focus, current.focus) {
+        case let (.editor(element, selection), .editor(other, otherSelection)):
+            guard CFEqual(element, other) else { return false }
+            guard let selection else { return true }
+            return otherSelection.map { CFEqual(selection, $0) } ?? false
+        case let (.terminal(window, element), .terminal(otherWindow, otherElement)):
+            guard CFEqual(window, otherWindow) else { return false }
+            if let element, let otherElement { return CFEqual(element, otherElement) }
+            return element == nil && otherElement == nil
+        default:
+            return false
+        }
     }
 }
 

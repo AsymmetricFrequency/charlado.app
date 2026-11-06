@@ -37,7 +37,7 @@ enum MeetingMCP {
                 let versions = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
                 result = ["protocolVersion": versions.contains(requested) ? requested : versions[0],
                           "capabilities": ["tools": [String: Any]()],
-                          "serverInfo": ["name": "charlado", "version": "0.6.0"]]
+                          "serverInfo": ["name": "charlado", "version": "0.6.1"]]
             case "ping":
                 result = [:]
             case "tools/list":
