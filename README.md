@@ -56,6 +56,14 @@ conserva la grafía de las coincidencias y pasa los términos como contexto al m
 local. El vocabulario orienta el reconocimiento, pero algunos nombres o acentos
 pueden requerir corrección.
 
+Si corriges una palabra o frase corta en una transcripción de la biblioteca,
+pulsa **Guardar cambios**. También puedes usar **Corregir último dictado…**
+desde el menú de Charlado. Si detecta un reemplazo como «the ploy» por
+`deploy`, ofrece añadir el término corregido. Elige los términos y confirma
+**Añadir seleccionados**, o pulsa **Ahora no**. Charlado toma las correcciones
+que haces dentro de la app. Los términos aceptados se usan como contexto en
+futuros dictados, incluido el modo mixto.
+
 Para alternar español e inglés dentro de un dictado o una reunión, instala el
 motor opcional y su modelo multilingüe de aproximadamente 57 MiB:
 

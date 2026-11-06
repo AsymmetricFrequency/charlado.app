@@ -15,6 +15,103 @@ enum CharladoFiles {
 }
 
 enum PersonalVocabulary {
+    private static let words = try! NSRegularExpression(pattern: #"[\p{L}][\p{L}\p{M}\p{N}_'’.-]*"#)
+
+    static var terms: [String] {
+        UserDefaults.standard.stringArray(forKey: "vocabulary") ?? []
+    }
+
+    static func save(_ items: [String]) {
+        var seen = Set<String>()
+        let clean = items.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && $0.count <= 50 && seen.insert($0.lowercased()).inserted }
+        UserDefaults.standard.set(Array(clean.prefix(30)), forKey: "vocabulary")
+    }
+
+    static func suggestions(before: String, after: String, existing: [String]) -> [String] {
+        guard before != after, existing.count < 30 else { return [] }
+        func tokenize(_ text: String) -> [String] {
+            words.matches(in: text, range: NSRange(text.startIndex..., in: text)).compactMap {
+                Range($0.range, in: text).map { String(text[$0]).trimmingCharacters(in: CharacterSet(charactersIn: ".")) }
+            }
+        }
+        let old = tokenize(before)
+        let new = tokenize(after)
+        let oldKeys = old.map { $0.lowercased() }
+        let newKeys = new.map { $0.lowercased() }
+        let common = min(old.count, new.count)
+        var first = 0
+        while first < common, oldKeys[first] == newKeys[first] { first += 1 }
+        var oldEnd = old.count
+        var newEnd = new.count
+        while oldEnd > first, newEnd > first, oldKeys[oldEnd - 1] == newKeys[newEnd - 1] {
+            oldEnd -= 1
+            newEnd -= 1
+        }
+        guard oldEnd > first, newEnd > first, oldEnd - first <= 800, newEnd - first <= 800 else { return [] }
+        let previous = Array(oldKeys[first..<oldEnd])
+        let revised = Array(newKeys[first..<newEnd])
+        let diff = revised.difference(from: previous)
+        let removals = Set(diff.removals.map { change -> Int in
+            if case let .remove(offset, _, _) = change { return offset }
+            return -1
+        })
+        let insertions = Set(diff.insertions.map { change -> Int in
+            if case let .insert(offset, _, _) = change { return offset }
+            return -1
+        })
+        var seen = Set(existing.map { $0.lowercased() })
+        var found: [String] = []
+        var i = 0
+        var j = 0
+        let limit = min(5, 30 - existing.count)
+        while (i < previous.count || j < revised.count) && found.count < limit {
+            let removedStart = i
+            let insertedStart = j
+            while removals.contains(i) { i += 1 }
+            while insertions.contains(j) { j += 1 }
+            if (1...5).contains(i - removedStart), (1...3).contains(j - insertedStart) {
+                let term = new[(first + insertedStart)..<(first + j)].joined(separator: " ")
+                if term.count <= 50, seen.insert(term.lowercased()).inserted { found.append(term) }
+            }
+            if i < previous.count, j < revised.count {
+                i += 1
+                j += 1
+            } else {
+                break
+            }
+        }
+        return found
+    }
+
+    static func offerCorrections(before: String, after: String, in window: NSWindow,
+                                 onAdded: @escaping (Int) -> Void) {
+        let suggestions = suggestions(before: before, after: after, existing: terms)
+        guard !suggestions.isEmpty, window.attachedSheet == nil else { return }
+        let alert = NSAlert()
+        alert.messageText = "Añadir al vocabulario"
+        alert.informativeText = "Charlado puede usar los términos seleccionados como ayuda en futuros dictados mixtos."
+        alert.addButton(withTitle: "Añadir seleccionados")
+        alert.addButton(withTitle: "Ahora no")
+        let choices = suggestions.map { term in
+            let button = NSButton(checkboxWithTitle: term, target: nil, action: nil)
+            button.state = .on
+            return button
+        }
+        let list = NSStackView(views: choices)
+        list.orientation = .vertical
+        list.alignment = .leading
+        list.spacing = 5
+        list.frame = NSRect(origin: .zero, size: list.fittingSize)
+        alert.accessoryView = list
+        alert.beginSheetModal(for: window) { result in
+            guard result == .alertFirstButtonReturn else { return }
+            let before = terms
+            save(before + choices.filter { $0.state == .on }.map(\.title))
+            onAdded(terms.count - before.count)
+        }
+    }
+
     static func apply(_ terms: [String], to segments: [TranscriptSegment]) -> [TranscriptSegment] {
         guard !terms.isEmpty else { return segments }
         let byName = Dictionary(terms.map { ($0.lowercased(), $0) }, uniquingKeysWith: { first, _ in first })
@@ -395,12 +492,16 @@ final class MeetingLibrary: NSObject {
     }
 
     @objc private func save() {
-        guard let note = edited else { return }
+        guard let note = edited, let original = selected else { return }
         do {
             try note.save(in: CharladoFiles.meetings)
             if isShared(note) { try note.save(in: CharladoFiles.shared) }
             open(selecting: note.id)
             message.stringValue = "Cambios guardados"
+            PersonalVocabulary.offerCorrections(before: original.transcriptText, after: note.transcriptText,
+                                                in: window) { count in
+                if count > 0 { self.message.stringValue = "Vocabulario actualizado" }
+            }
         } catch { message.stringValue = "No se pudieron guardar los cambios" }
     }
 

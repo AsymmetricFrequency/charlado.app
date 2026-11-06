@@ -272,9 +272,6 @@ enum LocalSpeech {
 final class Dictation: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate {
     private var speechLocale: Locale?
     private lazy var library = MeetingLibrary()
-    private var vocabulary: [String] {
-        UserDefaults.standard.stringArray(forKey: "vocabulary") ?? []
-    }
     private let meetingItem = NSMenuItem(title: "Iniciar reunión", action: #selector(toggleMeeting), keyEquivalent: "")
     private let callItem = NSMenuItem(title: "Grabar llamada…", action: #selector(startCallMeeting), keyEquivalent: "")
     private var startingCall = false
@@ -371,6 +368,7 @@ final class Dictation: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindow
         menu.addItem(NSMenuItem(title: "Conexiones MCP…", action: #selector(openConnections), keyEquivalent: ""))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Copiar último dictado", action: #selector(copyLast), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Corregir último dictado…", action: #selector(correctLast), keyEquivalent: ""))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Salir", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         for item in menu.items where item.action != nil { item.target = self }
@@ -630,16 +628,12 @@ final class Dictation: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindow
         alert.addButton(withTitle: "Cancelar")
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 330, height: 24))
         field.placeholderString = "deploy, staging, pull request"
-        field.stringValue = vocabulary.joined(separator: ", ")
+        field.stringValue = PersonalVocabulary.terms.joined(separator: ", ")
         alert.accessoryView = field
         alert.window.initialFirstResponder = field
         NSApp.activate(ignoringOtherApps: true)
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        var seen = Set<String>()
-        let terms = field.stringValue.split(separator: ",").map {
-            $0.trimmingCharacters(in: .whitespacesAndNewlines)
-        }.filter { !$0.isEmpty && $0.count <= 50 && seen.insert($0.lowercased()).inserted }
-        UserDefaults.standard.set(Array(terms.prefix(30)), forKey: "vocabulary")
+        PersonalVocabulary.save(field.stringValue.components(separatedBy: ","))
     }
 
     private func registerFallback() {
@@ -819,6 +813,46 @@ final class Dictation: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindow
         if copyToClipboard(lastText) { show("Último dictado copiado") }
     }
 
+    @objc private func correctLast() {
+        guard !lastText.isEmpty else {
+            show("Todavía no hay un dictado para corregir")
+            return
+        }
+        let original = lastText
+        openSetup()
+        guard let window = setupWindow, window.attachedSheet == nil else { return }
+        let alert = NSAlert()
+        alert.messageText = "Corregir último dictado"
+        alert.informativeText = "Corrige el texto y cópialo. Charlado te ofrecerá guardar términos nuevos en el vocabulario."
+        alert.addButton(withTitle: "Guardar y copiar")
+        alert.addButton(withTitle: "Cancelar")
+        let editor = NSTextView(frame: NSRect(x: 0, y: 0, width: 420, height: 170))
+        editor.isRichText = false
+        editor.isVerticallyResizable = true
+        editor.autoresizingMask = [.width]
+        editor.textContainer?.widthTracksTextView = true
+        editor.font = .systemFont(ofSize: 14)
+        editor.string = original
+        editor.setAccessibilityLabel("Texto del último dictado")
+        let scroll = NSScrollView(frame: editor.frame)
+        scroll.borderType = .bezelBorder
+        scroll.hasVerticalScroller = true
+        scroll.documentView = editor
+        alert.accessoryView = scroll
+        alert.window.initialFirstResponder = editor
+        alert.beginSheetModal(for: window) { response in
+            let corrected = editor.string.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard response == .alertFirstButtonReturn, !corrected.isEmpty else { return }
+            if self.lastText == original { self.lastText = corrected }
+            if copyToClipboard(corrected) { self.show("Dictado corregido copiado") }
+            DispatchQueue.main.async {
+                PersonalVocabulary.offerCorrections(before: original, after: corrected, in: window) { count in
+                    if count > 0 { self.show("Vocabulario actualizado") }
+                }
+            }
+        }
+    }
+
     private func show(_ text: String, icon: String = "🎙") {
         let symbol: String
         switch icon {
@@ -925,7 +959,7 @@ final class Dictation: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindow
         guard !recording.stopped else { return }
         let selectedLanguage = language
         let locale = speechLocale
-        let terms = vocabulary
+        let terms = PersonalVocabulary.terms
         meetingTimer?.invalidate()
         meetingTimer = nil
         meterTimer?.invalidate()
@@ -1097,6 +1131,15 @@ if CommandLine.arguments.dropFirst() == ["--check"] {
     let invented = MeetingDraft.Candidate(kind: .task, sourceIndex: 0, text: "Otro punto",
                                           evidence: "Texto ausente", owner: "", due: "")
     precondition(MeetingDraft.grounded(invented, in: [source]) == nil)
+    precondition(PersonalVocabulary.suggestions(before: "Haz el the ploy mañana.",
+                                                after: "Haz el deploy mañana.", existing: []) == ["deploy"])
+    precondition(PersonalVocabulary.suggestions(before: "the ploy", after: "deploy", existing: ["Deploy"]).isEmpty)
+    precondition(PersonalVocabulary.suggestions(before: "Revisa GitHub.", after: "Revisa github!", existing: []).isEmpty)
+    precondition(PersonalVocabulary.suggestions(before: "Haz el deploy", after: "Haz el deploy mañana",
+                                                existing: []).isEmpty)
+    precondition(PersonalVocabulary.suggestions(before: "Haz the ploy y revisa pool request.",
+                                                after: "Haz deploy y revisa pull request.",
+                                                existing: []) == ["deploy", "pull"])
     try MeetingMCP.check()
     print("Limpieza de texto y acceso de reuniones verificados")
 } else if CommandLine.arguments.dropFirst() == ["--draft-test"] {
