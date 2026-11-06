@@ -57,8 +57,9 @@ final class DictationIndicator {
     private let title = NSTextField(labelWithString: "")
     private let detail = NSTextField(labelWithString: "")
     private let symbol = NSImageView()
+    private let stopButton = NSButton()
 
-    init() {
+    init(target: AnyObject, stopAction: Selector) {
         let bounds = NSRect(x: 0, y: 0, width: 252, height: 62)
         panel = NSPanel(contentRect: bounds, styleMask: [.borderless, .nonactivatingPanel],
                         backing: .buffered, defer: false)
@@ -88,15 +89,38 @@ final class DictationIndicator {
         detail.frame = NSRect(x: 60, y: 15, width: 155, height: 15)
         symbol.contentTintColor = CharladoMark.accent
         symbol.frame = NSRect(x: 216, y: 22, width: 22, height: 22)
-        for view in [mark, title, detail, symbol] { surface.addSubview(view) }
+        stopButton.image = NSImage(systemSymbolName: "stop.fill", accessibilityDescription: "Terminar reunión")
+        stopButton.target = target
+        stopButton.action = stopAction
+        stopButton.bezelStyle = .circular
+        stopButton.frame = NSRect(x: 211, y: 16, width: 29, height: 30)
+        stopButton.isHidden = true
+        stopButton.setAccessibilityLabel("Terminar reunión")
+        for view in [mark, title, detail, symbol, stopButton] { surface.addSubview(view) }
     }
 
     func show(processing: Bool, test: Bool = false, fallback: Bool = false) {
+        panel.ignoresMouseEvents = true
+        stopButton.isHidden = true
+        symbol.isHidden = false
         title.stringValue = processing ? "Preparando texto" : "Tomando nota"
         detail.stringValue = processing ? "Transcripción local" :
             (test ? "Prueba de micrófono" : (fallback ? "Suelta el atajo para terminar" : "Suelta Fn para terminar"))
         symbol.image = NSImage(systemSymbolName: processing ? "ellipsis" : "waveform",
                                accessibilityDescription: title.stringValue)
+        reveal()
+    }
+
+    func showMeeting(title: String, detail: String) {
+        self.title.stringValue = title
+        self.detail.stringValue = detail
+        panel.ignoresMouseEvents = false
+        stopButton.isHidden = false
+        symbol.isHidden = true
+        reveal()
+    }
+
+    private func reveal() {
         if !panel.isVisible {
             let pointer = NSEvent.mouseLocation
             if let screen = NSScreen.screens.first(where: { $0.frame.contains(pointer) }) ?? NSScreen.main {

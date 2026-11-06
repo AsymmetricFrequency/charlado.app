@@ -47,3 +47,64 @@ La transcripción se realiza en el Mac con el modelo de Apple. Charlado usa arch
 ## Licencia
 
 [MIT](LICENSE)
+
+## Vocabulario y dictado mixto
+
+En la ventana principal, abre **Vocabulario** y escribe hasta 30 términos breves
+separados por comas, por ejemplo `deploy, staging, pull request, GitHub`. Charlado
+conserva la grafía de las coincidencias y pasa los términos como contexto al motor
+local. El vocabulario orienta el reconocimiento, pero algunos nombres o acentos
+pueden requerir corrección.
+
+Para alternar español e inglés dentro de un dictado o una reunión, instala el
+motor opcional y su modelo multilingüe de aproximadamente 57 MiB:
+
+```sh
+brew install whisper-cpp
+./setup-mixed.sh
+```
+
+El script comprueba la suma SHA-256 del modelo. Selecciona **Mixto ES + EN** en
+**Idioma del dictado**. La detección inicial del idioma es automática. El motor
+puede confundir palabras o perder precisión si cambias de idioma a mitad de frase.
+Para grabaciones de un solo idioma puedes elegir el modelo de macOS directamente.
+
+## Reuniones
+
+1. Elige el idioma en Charlado. Desde su barra de menú, pulsa **Iniciar reunión**
+   para grabar el micrófono o **Grabar llamada…** para elegir la aplicación de la llamada.
+2. Avisa a los participantes. Para llamadas, concede a Charlado el permiso de
+   **Grabación de pantalla y audio del sistema** cuando macOS lo pida. Charlado
+   captura audio del micrófono y de la aplicación seleccionada. En un navegador,
+   eso puede incluir audio de otras pestañas de la misma aplicación.
+3. Usa **Pausar reunión**, **Reanudar reunión** o **Marcar momento** desde el mismo
+   menú. El indicador muestra la duración grabada y el número de marcas.
+4. Pulsa **Terminar reunión**. La biblioteca guarda la transcripción con marcas de
+   tiempo, y permite añadir notas, exportar Markdown o usar **Copiar para IA**.
+   En llamadas las etiquetas **Micrófono** y **Llamada** identifican la fuente
+   de audio. La etiqueta **Llamada** agrupa a los participantes remotos.
+
+Charlado guarda las notas y transcripciones en
+`~/Library/Application Support/Charlado/Meetings`. La app elimina los archivos
+temporales de audio al terminar una sesión normal. **Copiar para IA** prepara el
+texto y una solicitud de resumen para que decidas dónde pegarlo.
+
+## MCP de reuniones
+
+En la biblioteca selecciona una reunión y pulsa **Compartir con MCP**. El
+servidor solo puede consultar las reuniones compartidas, mediante
+`search_meetings` y `read_meeting`. Puedes retirar cada reunión en la biblioteca.
+
+Para Claude Code, ejecuta:
+
+```sh
+claude mcp add --scope user --transport stdio charlado -- "$HOME/Applications/Charlado.app/Contents/MacOS/Charlado" --mcp
+```
+
+Para ChatGPT, usa el [túnel seguro de OpenAI](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels)
+con el comando stdio `~/Applications/Charlado.app/Contents/MacOS/Charlado --mcp`
+(expande `~` a tu ruta absoluta en la configuración). Crea o selecciona un túnel
+para tu espacio de trabajo, configura el cliente del túnel con ese comando y
+agrégalo como MCP personalizado en ChatGPT. Necesitas los permisos del espacio
+de trabajo y una clave de ejecución del túnel. Mientras un cliente esté
+conectado, podrá leer las reuniones que hayas compartido.

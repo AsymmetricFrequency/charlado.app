@@ -4,6 +4,7 @@ import AVFoundation
 import Carbon
 import OSLog
 import Speech
+import ScreenCaptureKit
 
 private let diagnostics = Logger(subsystem: "local.agentbot.charlado", category: "dictation")
 
@@ -78,12 +79,20 @@ func copyToClipboard(_ text: String) -> Bool {
 enum DictationLanguage: String, CaseIterable {
     case spanish = "es"
     case english = "en"
+    case mixed = "mixed"
 
-    var title: String { self == .spanish ? "Español" : "English" }
+    var title: String {
+        switch self {
+        case .spanish: return "Español"
+        case .english: return "English"
+        case .mixed: return "Mixto ES + EN"
+        }
+    }
     var localeIdentifiers: [String] {
         switch self {
         case .spanish: return ["es-CO", "es-MX", "es-ES", "es-US"]
         case .english: return ["en-US", "en-GB"]
+        case .mixed: return []
         }
     }
 }
@@ -95,7 +104,7 @@ private func audioWriter(at url: URL, format: AVAudioFormat) throws -> AVAudioFi
                            commonFormat: format.commonFormat, interleaved: format.isInterleaved)
 }
 
-private final class AudioCapture {
+final class AudioCapture {
     enum Outcome {
         case recorded, empty, writeFailed
     }
@@ -149,7 +158,7 @@ enum LocalSpeech {
         throw NSError(domain: "CharladoSpeech", code: 1)
     }
 
-    static func transcribe(_ url: URL, locale: Locale) async throws -> String {
+    static func transcribe(_ url: URL, locale: Locale, terms: [String] = []) async throws -> [TranscriptSegment] {
         let paddedURL = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString + ".caf")
         defer { try? FileManager.default.removeItem(at: paddedURL) }
@@ -157,7 +166,12 @@ enum LocalSpeech {
         let audio = try AVAudioFile(forReading: paddedURL)
         let transcriber = SpeechTranscriber(locale: locale, preset: .transcription)
         let analyzer = SpeechAnalyzer(modules: [transcriber])
-        async let output: String = collect(transcriber)
+        if !terms.isEmpty {
+            let context = AnalysisContext()
+            context.contextualStrings[.general] = terms
+            try await analyzer.setContext(context)
+        }
+        async let output = collect(transcriber)
         do {
             try await analyzer.start(inputAudioFile: audio, finishAfterFile: true)
             return try await output
@@ -190,17 +204,29 @@ enum LocalSpeech {
         try output.write(from: buffer)
     }
 
-    private static func collect(_ transcriber: SpeechTranscriber) async throws -> String {
-        var fragments: [String] = []
-        for try await result in transcriber.results {
-            if result.isFinal { fragments.append(String(result.text.characters)) }
+    private static func collect(_ transcriber: SpeechTranscriber) async throws -> [TranscriptSegment] {
+        var segments: [TranscriptSegment] = []
+        for try await result in transcriber.results where result.isFinal {
+            let text = String(result.text.characters).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !text.isEmpty { segments.append(TranscriptSegment(seconds: result.range.start.seconds, text: text)) }
         }
-        return clean(fragments.joined(separator: " "))
+        return segments
     }
 }
 
 final class Dictation: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate {
     private var speechLocale: Locale?
+    private lazy var library = MeetingLibrary()
+    private var vocabulary: [String] {
+        UserDefaults.standard.stringArray(forKey: "vocabulary") ?? []
+    }
+    private let meetingItem = NSMenuItem(title: "Iniciar reunión", action: #selector(toggleMeeting), keyEquivalent: "")
+    private let callItem = NSMenuItem(title: "Grabar llamada…", action: #selector(startCallMeeting), keyEquivalent: "")
+    private var startingCall = false
+    private let pauseItem = NSMenuItem(title: "Pausar reunión", action: #selector(toggleMeetingPause), keyEquivalent: "")
+    private let markerItem = NSMenuItem(title: "Marcar momento", action: #selector(markMeeting), keyEquivalent: "")
+    private var meetingTimer: Timer?
+    private lazy var meetingButton = NSButton(title: "Iniciar reunión", target: self, action: #selector(toggleMeeting))
     private var language = UserDefaults.standard.string(forKey: "dictationLanguage")
         .flatMap(DictationLanguage.init(rawValue:)) ?? .spanish
     private lazy var languagePicker: NSPopUpButton = {
@@ -222,7 +248,7 @@ final class Dictation: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindow
     private var fnDown = false
     private var fallbackDown = false
     private var setupWindow: NSWindow?
-    private lazy var indicator = DictationIndicator()
+    private lazy var indicator = DictationIndicator(target: self, stopAction: #selector(stopMeetingFromIndicator))
     private let fnStatus = NSTextField(labelWithString: "Fn: esperando una pulsación")
     private let setupStatus = NSTextField(wrappingLabelWithString: "")
     private let testResult = NSTextField(wrappingLabelWithString: "El texto de prueba aparecerá aquí.")
@@ -236,15 +262,28 @@ final class Dictation: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindow
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".caf")
         let destination: Destination?
         let isTest: Bool
+        let isMeeting: Bool
+        let startedAt = Date()
+        let callAudio: CallAudio?
+        var markers: [Double] = []
+        var elapsed: Double = 0
+        var resumedAt = ProcessInfo.processInfo.systemUptime
+        var paused = false
         var task: Task<Void, Never>?
         var capture: AudioCapture?
         var captureOutcome: AudioCapture.Outcome = .empty
         var latest = ""
         var stopped = false
 
-        init(isTest: Bool) {
+        init(isTest: Bool, isMeeting: Bool, callAudio: CallAudio?) {
+            self.callAudio = callAudio
             self.isTest = isTest
-            destination = !isTest && AXIsProcessTrusted() ? Destination.current() : nil
+            self.isMeeting = isMeeting
+            destination = !isTest && !isMeeting && AXIsProcessTrusted() ? Destination.current() : nil
+        }
+
+        var activeDuration: Double {
+            elapsed + (paused ? 0 : ProcessInfo.processInfo.systemUptime - resumedAt)
         }
 
         func stop() {
@@ -264,12 +303,22 @@ final class Dictation: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindow
         menu.addItem(message)
         menu.addItem(NSMenuItem(title: "Abrir Charlado", action: #selector(openSetup), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Configurar permisos", action: #selector(permissions), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Vocabulario personal…", action: #selector(editVocabulary), keyEquivalent: ""))
+        menu.addItem(.separator())
+        menu.addItem(meetingItem)
+        menu.addItem(callItem)
+        menu.addItem(pauseItem)
+        menu.addItem(markerItem)
+        menu.addItem(NSMenuItem(title: "Biblioteca de reuniones", action: #selector(openLibrary), keyEquivalent: ""))
+        menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Copiar último dictado", action: #selector(copyLast), keyEquivalent: ""))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Salir", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         for item in menu.items where item.action != nil { item.target = self }
         menu.items.last?.target = NSApp
         menu.delegate = self
+        menu.autoenablesItems = false
+        updateMeetingMenu()
         status.menu = menu
         registerFallback()
         openSetup()
@@ -328,14 +377,20 @@ final class Dictation: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindow
             let languageRow = NSStackView(views: [languageLabel, languagePicker])
             languageRow.alignment = .centerY
             languageRow.spacing = 12
+            let meetingActions = NSStackView(views: [
+                meetingButton,
+                NSButton(title: "Biblioteca", target: self, action: #selector(openLibrary)),
+                NSButton(title: "Vocabulario", target: self, action: #selector(editVocabulary))
+            ])
+            meetingActions.spacing = 12
             let stack = NSStackView(views: [header, instructions, shortcut, divider, languageRow,
-                                            setupStatus, fnStatus, actions, testButton, testResult])
+                                            setupStatus, fnStatus, actions, meetingActions, testButton, testResult])
             stack.orientation = .vertical
             stack.alignment = .leading
             stack.spacing = 16
             stack.translatesAutoresizingMaskIntoConstraints = false
 
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 470),
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 520),
                                   styleMask: [.titled, .closable], backing: .buffered, defer: false)
             window.title = "Charlado"
             window.appearance = NSAppearance(named: .aqua)
@@ -379,7 +434,142 @@ final class Dictation: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindow
     }
 
     func menuWillOpen(_ menu: NSMenu) {
-        if fnTap == nil { refreshSetup() }
+        if fnTap == nil, session == nil { refreshSetup() }
+        updateMeetingMenu()
+    }
+
+    private func updateMeetingMenu() {
+        let meeting = session?.isMeeting == true
+        let active = meeting && session?.stopped == false
+        meetingItem.title = active ? "Terminar reunión" : "Iniciar reunión"
+        meetingItem.isEnabled = !startingCall && (session == nil || active)
+        meetingButton.title = meetingItem.title
+        meetingButton.isEnabled = meetingItem.isEnabled
+        callItem.isEnabled = !startingCall && session == nil
+        pauseItem.title = session?.paused == true ? "Reanudar reunión" : "Pausar reunión"
+        pauseItem.isEnabled = active
+        markerItem.isEnabled = active && session?.paused == false
+    }
+
+    @objc private func toggleMeeting() {
+        if let session {
+            if session.isMeeting { endRecording(session) }
+            return
+        }
+        startRecording(isTest: false, isMeeting: true)
+    }
+
+    @objc private func startCallMeeting() {
+        guard session == nil, !startingCall else { return }
+        guard language == .mixed ? MixedSpeech.isReady : speechLocale != nil else {
+            prepareSpeech()
+            return
+        }
+        startingCall = true
+        languagePicker.isEnabled = false
+        updateMeetingMenu()
+        Task { @MainActor in
+            defer {
+                startingCall = false
+                languagePicker.isEnabled = session == nil
+                updateMeetingMenu()
+            }
+            do {
+                let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
+                guard let display = content.displays.first(where: { $0.displayID == CGMainDisplayID() })
+                        ?? content.displays.first else { throw CocoaError(.featureUnsupported) }
+                let applications = content.applications.filter {
+                    !$0.applicationName.isEmpty && $0.processID != ProcessInfo.processInfo.processIdentifier
+                }.sorted { $0.applicationName.localizedCaseInsensitiveCompare($1.applicationName) == .orderedAscending }
+                guard !applications.isEmpty else {
+                    show("Abre primero la aplicación de la llamada", icon: "🎙!")
+                    return
+                }
+                let alert = NSAlert()
+                alert.messageText = "Grabar llamada"
+                alert.informativeText = "Selecciona la aplicación de la llamada. Charlado graba su audio y tu micrófono. Avisa a los participantes antes de empezar."
+                alert.addButton(withTitle: "Empezar")
+                alert.addButton(withTitle: "Cancelar")
+                let picker = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 300, height: 28))
+                picker.addItems(withTitles: applications.enumerated().map { "\($0.offset + 1). \($0.element.applicationName)" })
+                alert.accessoryView = picker
+                NSApp.activate(ignoringOtherApps: true)
+                guard alert.runModal() == .alertFirstButtonReturn,
+                      applications.indices.contains(picker.indexOfSelectedItem) else { return }
+                let source = CallAudio()
+                try await source.start(display: display, application: applications[picker.indexOfSelectedItem])
+                startingCall = false
+                startRecording(isTest: false, isMeeting: true, callAudio: source)
+                if session?.callAudio !== source { _ = await source.stop() }
+            } catch {
+                let failure = error as NSError
+                diagnostics.error("No se pudo iniciar captura de llamada: \(failure.domain, privacy: .public) (\(failure.code))")
+                show("No se pudo capturar la llamada. Revisa Grabación de pantalla y audio del sistema en Ajustes", icon: "🎙!")
+            }
+        }
+    }
+
+    @objc private func stopMeetingFromIndicator() {
+        guard let session, session.isMeeting else { return }
+        endRecording(session)
+    }
+
+    @objc private func toggleMeetingPause() {
+        guard let session, session.isMeeting, !session.stopped else { return }
+        if session.paused {
+            do {
+                try session.engine.start()
+                session.resumedAt = ProcessInfo.processInfo.systemUptime
+                session.paused = false
+                session.callAudio?.enable(at: session.elapsed)
+            } catch {
+                show("No se pudo reanudar el micrófono", icon: "🎙!")
+            }
+        } else {
+            session.elapsed = session.activeDuration
+            session.paused = true
+            session.engine.pause()
+            session.callAudio?.pause()
+        }
+        updateMeetingDisplay()
+        updateMeetingMenu()
+    }
+
+    @objc private func markMeeting() {
+        guard let session, session.isMeeting, !session.stopped, !session.paused else { return }
+        session.markers.append(session.activeDuration)
+        updateMeetingDisplay()
+    }
+
+    private func updateMeetingDisplay() {
+        guard let session, session.isMeeting, !session.stopped else { return }
+        let duration = MeetingNote.timestamp(session.activeDuration)
+        let title = session.paused ? "Reunión en pausa" : "Grabando reunión"
+        let detail = "\(duration) · \(session.markers.count) marcas"
+        indicator.showMeeting(title: title, detail: detail)
+        show("\(title) · \(detail)", icon: session.paused ? "…" : "🔴")
+    }
+
+    @objc private func openLibrary() { library.open() }
+
+    @objc private func editVocabulary() {
+        let alert = NSAlert()
+        alert.messageText = "Vocabulario personal"
+        alert.informativeText = "Escribe nombres o frases cortas separados por comas. Se guardan en este Mac."
+        alert.addButton(withTitle: "Guardar")
+        alert.addButton(withTitle: "Cancelar")
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 330, height: 24))
+        field.placeholderString = "deploy, staging, pull request"
+        field.stringValue = vocabulary.joined(separator: ", ")
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        var seen = Set<String>()
+        let terms = field.stringValue.split(separator: ",").map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        }.filter { !$0.isEmpty && $0.count <= 50 && seen.insert($0.lowercased()).inserted }
+        UserDefaults.standard.set(Array(terms.prefix(30)), forKey: "vocabulary")
     }
 
     private func registerFallback() {
@@ -424,12 +614,16 @@ final class Dictation: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindow
         language = selected
         UserDefaults.standard.set(selected.rawValue, forKey: "dictationLanguage")
         speechLocale = nil
+        preparationFailed = false
         testResult.stringValue = "El texto de prueba aparecerá aquí."
         prepareSpeech()
     }
 
     private func prepareSpeech() {
-        guard speechLocale == nil, !preparingSpeech else { return }
+        guard language != .mixed, speechLocale == nil, !preparingSpeech else {
+            refreshSetup()
+            return
+        }
         preparingSpeech = true
         languagePicker.isEnabled = false
         preparationFailed = false
@@ -453,7 +647,11 @@ final class Dictation: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindow
             show("Preparando el modelo local · \(language.title)…", icon: "…")
             return
         }
-        if preparationFailed {
+        if language == .mixed, !MixedSpeech.isReady {
+            show("El modo mixto requiere whisper-cli y el modelo local. Consulta el README", icon: "🎙!")
+            return
+        }
+        if preparationFailed, language != .mixed {
             show("No se pudo preparar \(language.title). Pulsa Probar micrófono para reintentar", icon: "🎙!")
             return
         }
@@ -500,16 +698,27 @@ final class Dictation: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindow
             fnDown = false
             if !fallbackDown {
                 held = false
-                if let session, !session.stopped, !session.isTest { finish(session, interrupted: true) }
+                if let session, !session.stopped, !session.isTest, !session.isMeeting { finish(session, interrupted: true) }
             }
         }
         if let fnTap { CGEvent.tapEnable(tap: fnTap, enable: true) }
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let session, session.isMeeting else { return .terminateNow }
+        if session.stopped {
+            show("Espera a que se guarde la reunión antes de salir", icon: "…")
+            return .terminateCancel
+        }
+        endRecording(session)
+        return .terminateCancel
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         if let fallbackKey { UnregisterEventHotKey(fallbackKey) }
         if let fallbackHandler { RemoveEventHandler(fallbackHandler) }
         if let fnTap { CFMachPortInvalidate(fnTap) }
+        meetingTimer?.invalidate()
         session?.stop()
         session?.task?.cancel()
     }
@@ -569,8 +778,8 @@ final class Dictation: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindow
         startRecording(isTest: false)
     }
 
-    private func startRecording(isTest: Bool) {
-        guard session == nil else { return }
+    private func startRecording(isTest: Bool, isMeeting: Bool = false, callAudio: CallAudio? = nil) {
+        guard session == nil, !startingCall else { return }
         guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else {
             show("Falta el permiso de Micrófono", icon: "🎙!")
             return
@@ -579,12 +788,12 @@ final class Dictation: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindow
             show("Falta el permiso de Reconocimiento de voz", icon: "🎙!")
             return
         }
-        guard speechLocale != nil else {
+        guard language == .mixed ? MixedSpeech.isReady : speechLocale != nil else {
             prepareSpeech()
             return
         }
 
-        let recording = Recording(isTest: isTest)
+        let recording = Recording(isTest: isTest, isMeeting: isMeeting, callAudio: callAudio)
         let input = recording.engine.inputNode
         let format = input.outputFormat(forBus: 0)
         guard format.channelCount > 0, format.sampleRate > 0 else {
@@ -610,6 +819,16 @@ final class Dictation: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindow
 
         session = recording
         languagePicker.isEnabled = false
+        updateMeetingMenu()
+        if isMeeting {
+            recording.resumedAt = ProcessInfo.processInfo.systemUptime
+            recording.callAudio?.enable(at: 0)
+            updateMeetingDisplay()
+            meetingTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+                self?.updateMeetingDisplay()
+            }
+            return
+        }
         indicator.show(processing: false, test: isTest, fallback: fallbackDown)
         if isTest {
             testResult.stringValue = ""
@@ -621,47 +840,111 @@ final class Dictation: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindow
 
     private func release() {
         held = false
-        guard let recording = session, !recording.isTest else { return }
+        guard let recording = session, !recording.isTest, !recording.isMeeting else { return }
         endRecording(recording)
     }
 
     private func endRecording(_ recording: Recording) {
-        guard !recording.stopped, let locale = speechLocale else { return }
+        guard !recording.stopped else { return }
+        let selectedLanguage = language
+        let locale = speechLocale
+        let terms = vocabulary
+        meetingTimer?.invalidate()
+        meetingTimer = nil
+        recording.callAudio?.pause()
         recording.stop()
-        switch recording.captureOutcome {
-        case .empty:
-            finish(recording, interrupted: false, failure: "El micrófono no entregó audio. Mantén el atajo mientras hablas")
-            return
-        case .writeFailed:
-            finish(recording, interrupted: true, failure: "Falló la grabación. Vuelve a intentar con Probar micrófono")
-            return
-        case .recorded:
-            break
+        updateMeetingMenu()
+        if recording.callAudio == nil {
+            switch recording.captureOutcome {
+            case .empty:
+                finish(recording, interrupted: false, failure: "El micrófono no entregó audio")
+                return
+            case .writeFailed:
+                finish(recording, interrupted: true, failure: "Falló la grabación. Vuelve a intentar con Probar micrófono")
+                return
+            case .recorded:
+                break
+            }
         }
         indicator.show(processing: true)
         show("Procesando dictado", icon: "…")
         recording.task = Task { @MainActor [weak self, weak recording] in
             guard let self, let recording else { return }
             do {
-                recording.latest = try await LocalSpeech.transcribe(recording.url, locale: locale)
+                func transcribe(_ url: URL) async throws -> [TranscriptSegment] {
+                    if selectedLanguage == .mixed { return try await MixedSpeech.transcribe(url, terms: terms) }
+                    guard let locale else { throw CocoaError(.fileNoSuchFile) }
+                    return try await LocalSpeech.transcribe(url, locale: locale, terms: terms)
+                }
+                let callOffset = await recording.callAudio?.stop()
+                var segments: [TranscriptSegment] = []
+                var warnings: [String] = []
+                if recording.captureOutcome == .recorded {
+                    if recording.callAudio == nil {
+                        segments = try await transcribe(recording.url)
+                    } else {
+                        do {
+                            segments = try await transcribe(recording.url).map {
+                                TranscriptSegment(seconds: $0.seconds, text: $0.text, source: "Micrófono")
+                            }
+                        } catch { warnings.append("No se pudo transcribir el micrófono.") }
+                    }
+                } else {
+                    warnings.append("No se pudo guardar el audio del micrófono.")
+                }
+                if let call = recording.callAudio {
+                    if let offset = callOffset {
+                        do {
+                            let remote = try await transcribe(call.url).map {
+                                TranscriptSegment(seconds: $0.seconds + offset, text: $0.text, source: "Llamada")
+                            }
+                            if remote.isEmpty { warnings.append("El audio de la llamada no produjo texto.") }
+                            segments += remote
+                        } catch { warnings.append("No se pudo transcribir el audio de la llamada.") }
+                    } else { warnings.append("No se capturó audio de la aplicación seleccionada.") }
+                    if call.incomplete { warnings.append("La captura de la llamada se interrumpió.") }
+                    segments.sort { $0.seconds < $1.seconds }
+                }
                 guard self.session === recording else { return }
-                self.finish(recording, interrupted: false)
+                segments = PersonalVocabulary.apply(terms, to: segments)
+                if recording.isMeeting, !segments.isEmpty {
+                    let note = MeetingNote(id: UUID(), date: recording.startedAt,
+                                           title: "Reunión " + recording.startedAt.formatted(date: .abbreviated, time: .shortened),
+                                           language: selectedLanguage.title, markers: recording.markers,
+                                           segments: segments, notes: "",
+                                           captureWarning: warnings.isEmpty ? nil : warnings.joined(separator: " "))
+                    try note.save(in: CharladoFiles.meetings)
+                    self.resetRecording(recording)
+                    self.show("Reunión guardada")
+                    self.library.open(selecting: note.id)
+                } else {
+                    recording.latest = segments.map(\.text).joined(separator: " ")
+                    self.finish(recording, interrupted: false,
+                                failure: warnings.isEmpty ? nil : warnings.joined(separator: " "))
+                }
             } catch {
                 guard self.session === recording else { return }
                 let failure = error as NSError
-                diagnostics.error("Falló el reconocimiento en \(locale.identifier, privacy: .public): \(failure.domain, privacy: .public) (\(failure.code))")
+                diagnostics.error("Falló el reconocimiento en \(selectedLanguage.rawValue, privacy: .public): \(failure.domain, privacy: .public) (\(failure.code))")
                 self.finish(recording, interrupted: true)
             }
         }
     }
 
-    private func finish(_ recording: Recording, interrupted: Bool, failure: String? = nil) {
+    private func resetRecording(_ recording: Recording) {
         session = nil
+        meetingTimer?.invalidate()
+        meetingTimer = nil
+        updateMeetingMenu()
         languagePicker.isEnabled = true
         indicator.hide()
         testButton.title = "Probar micrófono"
         recording.stop()
         recording.task?.cancel()
+    }
+
+    private func finish(_ recording: Recording, interrupted: Bool, failure: String? = nil) {
+        resetRecording(recording)
         let text = clean(recording.latest)
         guard !text.isEmpty else {
             let message = failure ?? (interrupted ? "Falló la transcripción local" :
@@ -695,7 +978,13 @@ if CommandLine.arguments.dropFirst() == ["--check"] {
     precondition(clean("  mañana   a las tres. \n") == "Mañana a las tres.")
     precondition(clean("  ") == "")
     precondition(clean("¿Llegó Charlado?") == "¿Llegó Charlado?")
-    print("Limpieza de texto verificada")
+    let sample = TranscriptSegment(seconds: 0, text: "Usa github y pull request en githubdesk.")
+    precondition(PersonalVocabulary.apply(["GitHub", "pull request"], to: [sample]).first?.text ==
+                 "Usa GitHub y pull request en githubdesk.")
+    try MeetingMCP.check()
+    print("Limpieza de texto y acceso de reuniones verificados")
+} else if CommandLine.arguments.dropFirst() == ["--mcp"] {
+    MeetingMCP.run()
 } else if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--iconset" {
     try CharladoMark.writeIconset(to: URL(fileURLWithPath: CommandLine.arguments[2], isDirectory: true))
 } else if CommandLine.arguments.count == 4, CommandLine.arguments[1] == "--transcribe-test",
@@ -703,8 +992,14 @@ if CommandLine.arguments.dropFirst() == ["--check"] {
     let audio = URL(fileURLWithPath: CommandLine.arguments[3])
     Task {
         do {
-            let locale = try await LocalSpeech.prepare(language)
-            print(try await LocalSpeech.transcribe(audio, locale: locale))
+            let segments: [TranscriptSegment]
+            if language == .mixed {
+                segments = try await MixedSpeech.transcribe(audio, terms: [])
+            } else {
+                let locale = try await LocalSpeech.prepare(language)
+                segments = try await LocalSpeech.transcribe(audio, locale: locale)
+            }
+            print(clean(segments.map(\.text).joined(separator: " ")))
             exit(0)
         } catch {
             fputs("\(error)\n", stderr)

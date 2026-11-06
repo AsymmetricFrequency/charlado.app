@@ -1,0 +1,316 @@
+import AppKit
+import Foundation
+
+struct TranscriptSegment: Codable {
+    let seconds: Double
+    let text: String
+    var source: String? = nil
+}
+
+enum CharladoFiles {
+    static let root = URL.applicationSupportDirectory.appending(path: "Charlado", directoryHint: .isDirectory)
+    static let meetings = root.appending(path: "Meetings", directoryHint: .isDirectory)
+    static let shared = root.appending(path: "Shared Meetings", directoryHint: .isDirectory)
+    static let model = root.appending(path: "Models/ggml-base-q5_1.bin")
+}
+
+enum PersonalVocabulary {
+    static func apply(_ terms: [String], to segments: [TranscriptSegment]) -> [TranscriptSegment] {
+        guard !terms.isEmpty else { return segments }
+        let byName = Dictionary(terms.map { ($0.lowercased(), $0) }, uniquingKeysWith: { first, _ in first })
+        let choices = terms.sorted { $0.count > $1.count }.map(NSRegularExpression.escapedPattern).joined(separator: "|")
+        guard let pattern = try? NSRegularExpression(
+            pattern: "(?<![\\p{L}\\p{N}_])(?:\(choices))(?![\\p{L}\\p{N}_])",
+            options: [.caseInsensitive]) else { return segments }
+        return segments.map { segment in
+            let result = NSMutableString(string: segment.text)
+            let range = NSRange(segment.text.startIndex..., in: segment.text)
+            for match in pattern.matches(in: segment.text, range: range).reversed() {
+                if let spelling = byName[result.substring(with: match.range).lowercased()] {
+                    result.replaceCharacters(in: match.range, with: spelling)
+                }
+            }
+            return TranscriptSegment(seconds: segment.seconds, text: String(result), source: segment.source)
+        }
+    }
+}
+
+enum MixedSpeech {
+    static var executable: URL? {
+        ["/opt/homebrew/bin/whisper-cli", "/usr/local/bin/whisper-cli"]
+            .first(where: FileManager.default.isExecutableFile(atPath:))
+            .map { URL(fileURLWithPath: $0) }
+    }
+
+    static var isReady: Bool {
+        executable != nil && FileManager.default.isReadableFile(atPath: CharladoFiles.model.path)
+    }
+
+    static func transcribe(_ audio: URL, terms: [String]) async throws -> [TranscriptSegment] {
+        guard let executable, isReady else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
+                                                attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let wave = directory.appending(path: "input.wav")
+        let output = directory.appending(path: "transcript")
+        try run(URL(fileURLWithPath: "/usr/bin/afconvert"),
+                ["-f", "WAVE", "-d", "LEI16@16000", "-c", "1", audio.path, wave.path])
+        try Task.checkCancellation()
+        var args = ["-m", CharladoFiles.model.path, "-f", wave.path, "-l", "auto",
+                    "-oj", "-of", output.path, "-np"]
+        if !terms.isEmpty { args += ["--prompt", terms.joined(separator: ", ")] }
+        try run(executable, args)
+        try Task.checkCancellation()
+        let result = try JSONDecoder().decode(Output.self, from: Data(contentsOf: output.appendingPathExtension("json")))
+        return result.transcription.compactMap {
+            let text = clean($0.text)
+            return text.isEmpty ? nil : TranscriptSegment(seconds: $0.offsets.from / 1000, text: text)
+        }
+    }
+
+    private static func run(_ executable: URL, _ arguments: [String]) throws {
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = arguments
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw NSError(domain: "Charlado.\(executable.lastPathComponent)", code: Int(process.terminationStatus))
+        }
+    }
+
+    private struct Output: Decodable {
+        struct Segment: Decodable {
+            struct Offsets: Decodable { let from: Double }
+            let offsets: Offsets
+            let text: String
+        }
+        let transcription: [Segment]
+    }
+}
+
+struct MeetingNote: Codable {
+    let id: UUID
+    let date: Date
+    var title: String
+    let language: String
+    let markers: [Double]
+    let segments: [TranscriptSegment]
+    var notes: String
+    var captureWarning: String? = nil
+    var editedTranscript: String? = nil
+
+    var transcriptText: String {
+        editedTranscript ?? segments.map {
+            let speaker = $0.source.map { " **\($0):**" } ?? ""
+            return "**\(Self.timestamp($0.seconds))**\(speaker) \($0.text)"
+        }.joined(separator: "\n\n")
+    }
+
+    var markdown: String {
+        let points = markers.map { "- \(Self.timestamp($0))" }.joined(separator: "\n")
+        let warning = captureWarning.map { "\n> \($0)\n" } ?? ""
+        return """
+        # \(title)
+
+        \(date.formatted(date: .abbreviated, time: .shortened)) · \(language)
+        \(warning)
+        ## Decisiones, tareas y preguntas
+
+        \(notes)
+
+        ## Momentos marcados
+
+        \(points)
+
+        ## Transcripción
+
+        \(transcriptText)
+        """
+    }
+
+    static func timestamp(_ seconds: Double) -> String {
+        let total = Int(seconds.isFinite ? min(max(0, seconds), Double(Int32.max)) : 0)
+        return String(format: "%02d:%02d", total / 60, total % 60)
+    }
+
+    static func list(in directory: URL) -> [MeetingNote] {
+        let files = (try? FileManager.default.contentsOfDirectory(at: directory,
+                      includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey])) ?? []
+        return files.compactMap { url in
+            guard url.pathExtension == "json",
+                  let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]),
+                  values.isRegularFile == true, values.isSymbolicLink != true,
+                  let data = try? Data(contentsOf: url)
+            else { return nil }
+            return try? JSONDecoder().decode(MeetingNote.self, from: data)
+        }.sorted { $0.date > $1.date }
+    }
+
+    func save(in directory: URL) throws {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+        try JSONEncoder().encode(self).write(to: location(in: directory), options: .atomic)
+    }
+
+    func location(in directory: URL) -> URL {
+        directory.appending(path: id.uuidString + ".json")
+    }
+}
+
+final class MeetingLibrary: NSObject {
+    private let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 660, height: 510),
+                                  styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+    private let picker = NSPopUpButton()
+    private let titleField = NSTextField(string: "")
+    private let notesField = NSTextField(string: "")
+    private let transcript = NSTextView()
+    private let message = NSTextField(wrappingLabelWithString: "")
+    private lazy var share = NSButton(title: "Compartir con MCP", target: self, action: #selector(toggleShare))
+    private var entries: [MeetingNote] = []
+
+    override init() {
+        super.init()
+        window.title = "Reuniones · Charlado"
+        window.isReleasedWhenClosed = false
+        window.minSize = NSSize(width: 630, height: 450)
+        picker.target = self
+        picker.action = #selector(selectMeeting)
+        titleField.placeholderString = "Título de la reunión"
+        notesField.placeholderString = "Decisiones, tareas y preguntas abiertas"
+        transcript.isEditable = false
+        transcript.isRichText = false
+        transcript.font = .systemFont(ofSize: 14)
+        transcript.textContainerInset = NSSize(width: 10, height: 10)
+        let scroll = NSScrollView()
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .bezelBorder
+        scroll.documentView = transcript
+        transcript.isVerticallyResizable = true
+        transcript.autoresizingMask = [.width]
+        transcript.textContainer?.widthTracksTextView = true
+        let actions = NSStackView(views: [
+            NSButton(title: "Guardar cambios", target: self, action: #selector(save)),
+            NSButton(title: "Copiar para IA", target: self, action: #selector(copyMeeting)),
+            NSButton(title: "Exportar Markdown", target: self, action: #selector(exportMarkdown)),
+            share
+        ])
+        actions.spacing = 6
+        let rows = NSStackView(views: [picker, titleField, notesField, scroll, actions, message])
+        rows.orientation = .vertical
+        rows.alignment = .leading
+        rows.spacing = 12
+        rows.translatesAutoresizingMaskIntoConstraints = false
+        let content = window.contentView!
+        content.addSubview(rows)
+        NSLayoutConstraint.activate([
+            rows.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 20),
+            rows.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20),
+            rows.topAnchor.constraint(equalTo: content.topAnchor, constant: 20),
+            rows.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -20),
+            picker.widthAnchor.constraint(equalTo: rows.widthAnchor),
+            titleField.widthAnchor.constraint(equalTo: rows.widthAnchor),
+            notesField.widthAnchor.constraint(equalTo: rows.widthAnchor),
+            scroll.widthAnchor.constraint(equalTo: rows.widthAnchor),
+            scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 180),
+            message.widthAnchor.constraint(equalTo: rows.widthAnchor)
+        ])
+        window.center()
+    }
+
+    func open(selecting id: UUID? = nil) {
+        entries = MeetingNote.list(in: CharladoFiles.meetings)
+        picker.removeAllItems()
+        picker.addItems(withTitles: entries.enumerated().map { "\($0.offset + 1). \($0.element.title)" })
+        if let id, let index = entries.firstIndex(where: { $0.id == id }) { picker.selectItem(at: index) }
+        selectMeeting()
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    private var selected: MeetingNote? {
+        guard entries.indices.contains(picker.indexOfSelectedItem) else { return nil }
+        return entries[picker.indexOfSelectedItem]
+    }
+
+    private var edited: MeetingNote? {
+        guard var note = selected else { return nil }
+        let title = titleField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !title.isEmpty { note.title = title }
+        note.notes = notesField.stringValue
+        if transcript.string != note.transcriptText { note.editedTranscript = transcript.string }
+        return note
+    }
+
+    private func isShared(_ note: MeetingNote) -> Bool {
+        FileManager.default.fileExists(atPath: note.location(in: CharladoFiles.shared).path)
+    }
+
+    @objc private func selectMeeting() {
+        titleField.stringValue = selected?.title ?? ""
+        notesField.stringValue = selected?.notes ?? ""
+        transcript.isEditable = selected != nil
+        transcript.string = selected?.transcriptText ?? "Aún no hay reuniones. Inicia una desde la barra de menú."
+        share.title = selected.map(isShared) == true ? "Retirar de MCP" : "Compartir con MCP"
+        let marks = selected?.markers.map(MeetingNote.timestamp).joined(separator: " · ") ?? ""
+        message.stringValue = [selected?.captureWarning, marks.isEmpty ? nil : "Marcas · " + marks]
+            .compactMap { $0 }.joined(separator: "\n")
+    }
+
+    @objc private func save() {
+        guard let note = edited else { return }
+        do {
+            try note.save(in: CharladoFiles.meetings)
+            if isShared(note) { try note.save(in: CharladoFiles.shared) }
+            open(selecting: note.id)
+            message.stringValue = "Cambios guardados"
+        } catch { message.stringValue = "No se pudieron guardar los cambios" }
+    }
+
+    @objc private func copyMeeting() {
+        guard let note = edited else { return }
+        let request = """
+        Resume esta reunión en decisiones, tareas y preguntas abiertas. Cita la marca de tiempo de cada punto.
+        Si una tarea carece de responsable o fecha explícitos, indícalo. Usa la transcripción como evidencia.
+
+        ---
+        """
+        guard copyToClipboard(request + "\n\n" + note.markdown) else { return }
+        message.stringValue = "Reunión copiada. Puedes pegarla en ChatGPT o Claude"
+    }
+
+    @objc private func exportMarkdown() {
+        guard let note = edited else { return }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "Reunión.md"
+        panel.beginSheetModal(for: window) { response in
+            guard response == .OK, let url = panel.url else { return }
+            do { try note.markdown.write(to: url, atomically: true, encoding: .utf8) }
+            catch { self.message.stringValue = "No se pudo exportar la reunión" }
+        }
+    }
+
+    @objc private func toggleShare() {
+        guard let note = selected else { return }
+        do {
+            if isShared(note) {
+                try FileManager.default.removeItem(at: note.location(in: CharladoFiles.shared))
+            } else {
+                let alert = NSAlert()
+                alert.messageText = "Compartir esta reunión con MCP"
+                alert.informativeText = "Los clientes MCP que conectes podrán leer la transcripción y las notas de esta reunión."
+                alert.addButton(withTitle: "Compartir")
+                alert.addButton(withTitle: "Cancelar")
+                guard alert.runModal() == .alertFirstButtonReturn else { return }
+                try note.save(in: CharladoFiles.shared)
+            }
+            selectMeeting()
+            message.stringValue = isShared(note) ? "Visible para el MCP local" : "Retirada del MCP local"
+        } catch { message.stringValue = "No se pudo cambiar el acceso" }
+    }
+}
