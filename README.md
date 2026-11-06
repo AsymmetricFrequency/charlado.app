@@ -1,6 +1,6 @@
 # Charlado
 
-Dictado local en español para macOS. Mantén pulsada **Fn (🌐)**, habla y suelta la tecla para pegar el texto donde está el cursor. Charlado vive en la barra de menú y muestra un pequeño indicador mientras graba y transcribe.
+Dictado local en español e inglés para macOS. Mantén pulsada **Fn (🌐)**, habla y suelta la tecla para pegar el texto donde está el cursor. Charlado vive en la barra de menú y muestra un pequeño indicador mientras graba y transcribe.
 
 ## Instalación desde el código
 
@@ -13,9 +13,20 @@ cd charlado.app
 open ~/Applications/Charlado.app
 ```
 
-1. En Charlado, pulsa **Configurar permisos**. Concede Micrófono y Reconocimiento de voz. En **Ajustes del Sistema → Privacidad y seguridad**, habilita Charlado en **Accesibilidad** y **Monitorización de entrada**. Si la app no aparece, agrégala con **+** desde `~/Applications`.
-2. Vuelve a abrir la app si macOS te lo pide. El primer arranque puede descargar el modelo local de español.
-3. Pulsa **Probar micrófono** para ver una transcripción dentro de Charlado, o pulsa **Seguir en segundo plano** para usarlo en otras apps.
+## Configurar el dictado en español
+
+1. Abre **Charlado** y pulsa **Configurar permisos**. Concede **Micrófono** y **Reconocimiento de voz** cuando macOS lo solicite.
+2. En **Ajustes del Sistema → Privacidad y seguridad**, habilita Charlado en **Accesibilidad** y **Monitorización de entrada**. Si no aparece, pulsa **+** en el panel correspondiente, abre `~/Applications` y selecciona `Charlado.app`.
+3. Vuelve a abrir Charlado si macOS lo pide. En **Idioma del dictado**, selecciona **Español**. Si falta el modelo de Apple, macOS lo descarga en este paso. Espera a que Charlado indique que está listo.
+4. Pulsa **Probar micrófono**, di «Mañana revisamos el proyecto a las tres» y pulsa **Terminar prueba**. El resultado aparece en la misma ventana.
+5. Pulsa **Seguir en segundo plano**. Coloca el cursor en un campo de texto, mantén **Fn**, dicta y suelta la tecla. Si el texto queda en el portapapeles, pégalo con **⌘V**.
+
+## Dictate in English
+
+1. Build and open Charlado using the commands above. Click **Configurar permisos** and allow Microphone and Speech Recognition. Enable Charlado under **System Settings → Privacy & Security → Accessibility** and **Input Monitoring**, then reopen it if prompted.
+2. Choose **English** in **Idioma del dictado**. macOS downloads its local English model if needed. Charlado remembers your selection.
+3. Click **Probar micrófono**, say “The meeting starts at nine,” then click **Terminar prueba** to see the text.
+4. Click **Seguir en segundo plano**. In a text field, hold **Fn** to talk and release it to paste. Use **⌘V** if automatic paste fails.
 
 Si Fn abre emojis o activa una función de macOS, elige **No hacer nada** para Fn/🌐 en **Ajustes del Sistema → Teclado**. También puedes mantener pulsado **Control + Opción + D**.
 

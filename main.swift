@@ -75,9 +75,22 @@ func copyToClipboard(_ text: String) -> Bool {
     return board.setString(text, forType: .string)
 }
 
+enum DictationLanguage: String, CaseIterable {
+    case spanish = "es"
+    case english = "en"
+
+    var title: String { self == .spanish ? "Español" : "English" }
+    var localeIdentifiers: [String] {
+        switch self {
+        case .spanish: return ["es-CO", "es-MX", "es-ES", "es-US"]
+        case .english: return ["en-US", "en-GB"]
+        }
+    }
+}
+
 enum LocalSpeech {
-    static func prepare() async throws -> Locale {
-        for identifier in ["es-CO", "es-MX", "es-ES", "es-US"] {
+    static func prepare(_ language: DictationLanguage) async throws -> Locale {
+        for identifier in language.localeIdentifiers {
             if let locale = await SpeechTranscriber.supportedLocale(equivalentTo: Locale(identifier: identifier)) {
                 let transcriber = SpeechTranscriber(locale: locale, preset: .transcription)
                 if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
@@ -141,6 +154,17 @@ enum LocalSpeech {
 
 final class Dictation: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate {
     private var speechLocale: Locale?
+    private var language = UserDefaults.standard.string(forKey: "dictationLanguage")
+        .flatMap(DictationLanguage.init(rawValue:)) ?? .spanish
+    private lazy var languagePicker: NSPopUpButton = {
+        let picker = NSPopUpButton()
+        picker.addItems(withTitles: DictationLanguage.allCases.map(\.title))
+        picker.selectItem(withTitle: language.title)
+        picker.target = self
+        picker.action = #selector(changeLanguage)
+        picker.setAccessibilityLabel("Idioma del dictado")
+        return picker
+    }()
     private var preparingSpeech = false
     private var preparationFailed = false
     private let status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -215,7 +239,7 @@ final class Dictation: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindow
             let title = NSTextField(labelWithString: "Charlado")
             title.font = .systemFont(ofSize: 38, weight: .heavy)
             title.textColor = CharladoMark.ink
-            let subtitle = NSTextField(labelWithString: "DICTADO LOCAL  /  ESPAÑOL")
+            let subtitle = NSTextField(labelWithString: "DICTADO LOCAL  /  macOS")
             subtitle.font = .monospacedSystemFont(ofSize: 11, weight: .medium)
             subtitle.textColor = .secondaryLabelColor
             let brand = NSStackView(views: [title, subtitle])
@@ -248,14 +272,19 @@ final class Dictation: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindow
             divider.boxType = .custom
             divider.borderWidth = 0
             divider.fillColor = CharladoMark.ink
-            let stack = NSStackView(views: [header, instructions, shortcut, divider, setupStatus, fnStatus,
-                                            actions, testButton, testResult])
+            let languageLabel = NSTextField(labelWithString: "Idioma del dictado")
+            languageLabel.font = .systemFont(ofSize: 13, weight: .medium)
+            let languageRow = NSStackView(views: [languageLabel, languagePicker])
+            languageRow.alignment = .centerY
+            languageRow.spacing = 12
+            let stack = NSStackView(views: [header, instructions, shortcut, divider, languageRow,
+                                            setupStatus, fnStatus, actions, testButton, testResult])
             stack.orientation = .vertical
             stack.alignment = .leading
             stack.spacing = 16
             stack.translatesAutoresizingMaskIntoConstraints = false
 
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 425),
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 470),
                                   styleMask: [.titled, .closable], backing: .buffered, defer: false)
             window.title = "Charlado"
             window.appearance = NSAppearance(named: .aqua)
@@ -337,31 +366,44 @@ final class Dictation: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindow
         if isDown { press() } else { release() }
     }
 
+    @objc private func changeLanguage() {
+        guard session == nil, !preparingSpeech else { return }
+        let selected = DictationLanguage.allCases[languagePicker.indexOfSelectedItem]
+        guard selected != language else { return }
+        language = selected
+        UserDefaults.standard.set(selected.rawValue, forKey: "dictationLanguage")
+        speechLocale = nil
+        testResult.stringValue = "El texto de prueba aparecerá aquí."
+        prepareSpeech()
+    }
+
     private func prepareSpeech() {
         guard speechLocale == nil, !preparingSpeech else { return }
         preparingSpeech = true
+        languagePicker.isEnabled = false
         preparationFailed = false
         refreshSetup()
         Task { @MainActor in
             defer {
                 preparingSpeech = false
+                languagePicker.isEnabled = true
                 refreshSetup()
             }
-            do { speechLocale = try await LocalSpeech.prepare() }
+            do { speechLocale = try await LocalSpeech.prepare(language) }
             catch {
                 preparationFailed = true
-                NSLog("Charlado: error preparando español: %@", String(describing: error))
+                NSLog("Charlado: error preparando el modelo de idioma: %@", String(describing: error))
             }
         }
     }
 
     private func refreshSetup() {
         if preparingSpeech {
-            show("Preparando el modelo local de español…", icon: "…")
+            show("Preparando el modelo local · \(language.title)…", icon: "…")
             return
         }
         if preparationFailed {
-            show("No se pudo preparar español. Pulsa Probar micrófono para reintentar", icon: "🎙!")
+            show("No se pudo preparar \(language.title). Pulsa Probar micrófono para reintentar", icon: "🎙!")
             return
         }
         guard CGPreflightListenEventAccess() else {
@@ -396,7 +438,7 @@ final class Dictation: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindow
 
         if AVCaptureDevice.authorizationStatus(for: .audio) == .authorized,
            SFSpeechRecognizer.authorizationStatus() == .authorized, AXIsProcessTrusted() {
-            show("Mantén pulsada Fn para dictar")
+            show("Listo en \(language.title). Mantén Fn para dictar")
         } else {
             show("Abre Configurar permisos para completar la configuración", icon: "🎙!")
         }
@@ -517,6 +559,7 @@ final class Dictation: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindow
         }
 
         session = recording
+        languagePicker.isEnabled = false
         indicator.show(processing: false, test: isTest, fallback: fallbackDown)
         if isTest {
             testResult.stringValue = ""
@@ -553,6 +596,7 @@ final class Dictation: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindow
 
     private func finish(_ recording: Recording, interrupted: Bool) {
         session = nil
+        languagePicker.isEnabled = true
         indicator.hide()
         testButton.title = "Probar micrófono"
         recording.stop()
@@ -589,11 +633,12 @@ if CommandLine.arguments.dropFirst() == ["--check"] {
     print("Limpieza de texto verificada")
 } else if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--iconset" {
     try CharladoMark.writeIconset(to: URL(fileURLWithPath: CommandLine.arguments[2], isDirectory: true))
-} else if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--transcribe-test" {
-    let audio = URL(fileURLWithPath: CommandLine.arguments[2])
+} else if CommandLine.arguments.count == 4, CommandLine.arguments[1] == "--transcribe-test",
+          let language = DictationLanguage(rawValue: CommandLine.arguments[2]) {
+    let audio = URL(fileURLWithPath: CommandLine.arguments[3])
     Task {
         do {
-            let locale = try await LocalSpeech.prepare()
+            let locale = try await LocalSpeech.prepare(language)
             print(try await LocalSpeech.transcribe(audio, locale: locale))
             exit(0)
         } catch {
