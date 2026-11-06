@@ -213,20 +213,24 @@ final class Dictation: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindow
     @objc private func openSetup() {
         if setupWindow == nil {
             let title = NSTextField(labelWithString: "Charlado")
-            title.font = .systemFont(ofSize: 28, weight: .semibold)
-            let subtitle = NSTextField(labelWithString: "Dictado local en español")
-            subtitle.font = .systemFont(ofSize: 13)
+            title.font = .systemFont(ofSize: 38, weight: .heavy)
+            title.textColor = CharladoMark.ink
+            let subtitle = NSTextField(labelWithString: "DICTADO LOCAL  /  ESPAÑOL")
+            subtitle.font = .monospacedSystemFont(ofSize: 11, weight: .medium)
             subtitle.textColor = .secondaryLabelColor
             let brand = NSStackView(views: [title, subtitle])
             brand.orientation = .vertical
             brand.alignment = .leading
             brand.spacing = 2
-            let avatar = NSImageView(image: CharladoMark.image(size: 64))
-            let header = NSStackView(views: [avatar, brand])
+            let mark = NSImageView(image: CharladoMark.image(size: 64))
+            let header = NSStackView(views: [mark, brand])
             header.spacing = 12
             let instructions = NSTextField(wrappingLabelWithString:
-                "Mantén pulsada Fn para hablar. Suéltala para pegar el texto donde está el cursor. También puedes usar Control + Opción + D.")
-            instructions.font = .systemFont(ofSize: 14)
+                "Mantén Fn mientras hablas. Suelta para pegar el texto donde está el cursor.")
+            instructions.font = .systemFont(ofSize: 17, weight: .medium)
+            let shortcut = NSTextField(labelWithString: "ATAJO ALTERNATIVO   ⌃ ⌥ D")
+            shortcut.font = .monospacedSystemFont(ofSize: 11, weight: .medium)
+            shortcut.textColor = .secondaryLabelColor
             setupStatus.font = .systemFont(ofSize: 13, weight: .semibold)
             fnStatus.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
             fnStatus.textColor = .secondaryLabelColor
@@ -235,23 +239,27 @@ final class Dictation: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindow
                                       action: #selector(hideSetup))
             background.bezelStyle = .rounded
             background.controlSize = .large
-            background.bezelColor = CharladoMark.mint
+            background.bezelColor = CharladoMark.accent
             background.setAccessibilityHelp("Oculta la ventana y mantiene activo el atajo de dictado.")
             let actions = NSStackView(views: [background, button])
             actions.alignment = .centerY
             actions.spacing = 12
             let divider = NSBox()
-            divider.boxType = .separator
-            let stack = NSStackView(views: [header, instructions, divider, setupStatus, fnStatus,
+            divider.boxType = .custom
+            divider.borderWidth = 0
+            divider.fillColor = CharladoMark.ink
+            let stack = NSStackView(views: [header, instructions, shortcut, divider, setupStatus, fnStatus,
                                             actions, testButton, testResult])
             stack.orientation = .vertical
             stack.alignment = .leading
             stack.spacing = 16
             stack.translatesAutoresizingMaskIntoConstraints = false
 
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 400),
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 425),
                                   styleMask: [.titled, .closable], backing: .buffered, defer: false)
             window.title = "Charlado"
+            window.appearance = NSAppearance(named: .aqua)
+            window.backgroundColor = CharladoMark.paper
             window.delegate = self
             window.isReleasedWhenClosed = false
             if let content = window.contentView {
@@ -260,9 +268,10 @@ final class Dictation: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindow
                     stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 24),
                     stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 24),
                     stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24),
-                    avatar.widthAnchor.constraint(equalToConstant: 64),
-                    avatar.heightAnchor.constraint(equalToConstant: 64),
+                    mark.widthAnchor.constraint(equalToConstant: 64),
+                    mark.heightAnchor.constraint(equalToConstant: 64),
                     divider.widthAnchor.constraint(equalTo: stack.widthAnchor),
+                    divider.heightAnchor.constraint(equalToConstant: 1),
                     instructions.widthAnchor.constraint(equalTo: stack.widthAnchor),
                     setupStatus.widthAnchor.constraint(equalTo: stack.widthAnchor),
                     testResult.widthAnchor.constraint(equalTo: stack.widthAnchor)

@@ -1,8 +1,9 @@
 import AppKit
 
 enum CharladoMark {
-    static let mint = NSColor(srgbRed: 0.54, green: 0.93, blue: 0.78, alpha: 1)
-    static let ink = NSColor(srgbRed: 0.06, green: 0.15, blue: 0.15, alpha: 1)
+    static let accent = NSColor(srgbRed: 1, green: 0.81, blue: 0.29, alpha: 1)
+    static let ink = NSColor(srgbRed: 0.09, green: 0.09, blue: 0.08, alpha: 1)
+    static let paper = NSColor(srgbRed: 0.97, green: 0.96, blue: 0.92, alpha: 1)
 
     static func image(size: CGFloat) -> NSImage {
         NSImage(size: NSSize(width: size, height: size), flipped: false) { rect in
@@ -12,44 +13,25 @@ enum CharladoMark {
             transform.concat()
             defer { NSGraphicsContext.restoreGraphicsState() }
 
-            let tile = NSBezierPath(roundedRect: NSRect(x: 7, y: 7, width: 114, height: 114),
-                                    xRadius: 29, yRadius: 29)
-            NSGradient(starting: mint, ending: NSColor(srgbRed: 0.22, green: 0.68,
-                                                      blue: 0.59, alpha: 1))?.draw(in: tile, angle: 255)
             ink.setFill()
-            let note = NSBezierPath(roundedRect: NSRect(x: 30, y: 34, width: 61, height: 60),
-                                    xRadius: 15, yRadius: 15)
-            note.fill()
-            let tail = NSBezierPath()
-            tail.move(to: NSPoint(x: 41, y: 38))
-            tail.line(to: NSPoint(x: 40, y: 25))
-            tail.line(to: NSPoint(x: 58, y: 36))
-            tail.close()
-            tail.fill()
+            NSBezierPath(roundedRect: NSRect(x: 10, y: 7, width: 110, height: 110),
+                         xRadius: 23, yRadius: 23).fill()
+            let face = NSBezierPath(roundedRect: NSRect(x: 8, y: 11, width: 106, height: 110),
+                                    xRadius: 22, yRadius: 22)
+            accent.setFill()
+            face.fill()
+            ink.setStroke()
+            face.lineWidth = 3
+            face.stroke()
 
-            mint.setFill()
-            for x in [46, 68] {
-                NSBezierPath(roundedRect: NSRect(x: x, y: 63, width: 6, height: 10),
-                             xRadius: 3, yRadius: 3).fill()
+            // A voice signal followed by a writing cursor.
+            ink.setFill()
+            let heights: [CGFloat] = [18, 42, 62, 34]
+            for (index, height) in heights.enumerated() {
+                let x = 28 + CGFloat(index) * 14
+                NSBezierPath(rect: NSRect(x: x, y: 65 - height / 2, width: 7, height: height)).fill()
             }
-            mint.setStroke()
-            let smile = NSBezierPath()
-            smile.move(to: NSPoint(x: 52, y: 54))
-            smile.curve(to: NSPoint(x: 68, y: 54), controlPoint1: NSPoint(x: 56, y: 48),
-                        controlPoint2: NSPoint(x: 64, y: 48))
-            smile.lineWidth = 2.7
-            smile.lineCapStyle = .round
-            smile.stroke()
-
-            let pencil = NSBezierPath()
-            pencil.move(to: NSPoint(x: 74, y: 28))
-            pencil.line(to: NSPoint(x: 93, y: 54))
-            pencil.line(to: NSPoint(x: 101, y: 48))
-            pencil.line(to: NSPoint(x: 83, y: 23))
-            pencil.line(to: NSPoint(x: 73, y: 19))
-            pencil.close()
-            NSColor(srgbRed: 1, green: 0.89, blue: 0.65, alpha: 1).setFill()
-            pencil.fill()
+            NSBezierPath(rect: NSRect(x: 86, y: 47, width: 9, height: 7)).fill()
             return true
         }
     }
@@ -88,27 +70,25 @@ final class DictationIndicator {
         panel.level = .statusBar
         panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary, .ignoresCycle]
 
-        let glass = NSVisualEffectView(frame: bounds)
-        glass.material = .hudWindow
-        glass.appearance = NSAppearance(named: .darkAqua)
-        glass.state = .active
-        glass.blendingMode = .behindWindow
-        glass.wantsLayer = true
-        glass.layer?.cornerRadius = 20
-        glass.layer?.masksToBounds = true
-        panel.contentView = glass
+        let surface = NSView(frame: bounds)
+        surface.wantsLayer = true
+        surface.layer?.backgroundColor = CharladoMark.ink.cgColor
+        surface.layer?.borderColor = CharladoMark.accent.cgColor
+        surface.layer?.borderWidth = 1
+        surface.layer?.cornerRadius = 10
+        panel.contentView = surface
 
-        let avatar = NSImageView(image: CharladoMark.image(size: 40))
-        avatar.frame = NSRect(x: 12, y: 11, width: 40, height: 40)
+        let mark = NSImageView(image: CharladoMark.image(size: 40))
+        mark.frame = NSRect(x: 12, y: 11, width: 40, height: 40)
         title.font = .systemFont(ofSize: 14, weight: .semibold)
         title.textColor = .white
         title.frame = NSRect(x: 60, y: 33, width: 155, height: 18)
         detail.font = .systemFont(ofSize: 11)
-        detail.textColor = .secondaryLabelColor
+        detail.textColor = NSColor(white: 0.76, alpha: 1)
         detail.frame = NSRect(x: 60, y: 15, width: 155, height: 15)
-        symbol.contentTintColor = CharladoMark.mint
+        symbol.contentTintColor = CharladoMark.accent
         symbol.frame = NSRect(x: 216, y: 22, width: 22, height: 22)
-        for view in [avatar, title, detail, symbol] { glass.addSubview(view) }
+        for view in [mark, title, detail, symbol] { surface.addSubview(view) }
     }
 
     func show(processing: Bool, test: Bool = false, fallback: Bool = false) {
